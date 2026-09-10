@@ -1,0 +1,9 @@
+{
+  "name": "lp-truth-gateway",
+  "version": "1.0.0",
+  "private": false,
+  "type": "module",
+  "engines": { "node": ">=22.13.0" },
+  "scripts": { "typecheck": "tsc --noEmit", "test": "tsx --test tests/*.test.ts", "lint": "eslint src tests runner.ts" },
+  "devDependencies": { "@types/node": "22.19.19", "@typescript-eslint/eslint-plugin": "^8.70.0", "@typescript-eslint/parser": "^8.70.0", "eslint": "9.39.4", "tsx": "4.20.5", "typescript": "5.9.3" }
+}

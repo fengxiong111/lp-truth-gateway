@@ -1,0 +1,2 @@
+import {test} from "node:test"; import assert from "node:assert/strict"; import {buildTruth} from "../src/index.js";
+test("artifact contract keeps unknowns null and discovers candidates",async()=>{const a=await buildTruth("0x39dbed3a2bd333467115de45665cc57f813c4571"); assert.equal(a.schemaVersion,"lp-truth-v1"); assert.ok(a.poolCandidates.length>=1); assert.equal(a.market.activeLiquidityUsd,null); assert.equal(a.market.tick.current,null);});

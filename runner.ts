@@ -1,0 +1,1 @@
+import {buildTruth} from "./src/index.js"; const address=process.argv[2]; if(!address||!/^(0x)[a-fA-F0-9]{40}$/.test(address))throw new Error("INVALID_EVM_ADDRESS"); console.log(JSON.stringify(await buildTruth(address),null,2));
