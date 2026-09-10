@@ -734,7 +734,7 @@ async function buildTruth(address2, options = {}) {
   });
   const verified = await verifyPools(discovered, options.preferredPool, fast2);
   const candidates = verified.candidates, selected = verified.selected;
-  const onchainEvidencePromise = verified.onchain ? fetchOnchainEvidence(verified.onchain, { allowLiveFeeGrowth: !fast2 }) : Promise.resolve(null);
+  const onchainEvidencePromise = !fast2 && verified.onchain ? fetchOnchainEvidence(verified.onchain, { allowLiveFeeGrowth: true }) : Promise.resolve(null);
   const statuses = [
     { ...dex.status, transport: "PUBLIC_ENDPOINT" },
     ...verified.statuses,
@@ -744,33 +744,46 @@ async function buildTruth(address2, options = {}) {
   let ohlcv5m = [], ohlcv30m = [], ohlcv1h = [], ohlcv1d = [];
   let historyReady = false;
   if (selected) {
-    const [paprika, gecko] = await Promise.all([
-      Promise.all([
-        fetchPaprikaOhlcv(selected, "5m", 1),
-        fetchPaprikaOhlcv(selected, "30m", 1),
+    if (fast2) {
+      const [paprika1h, gecko1h] = await Promise.all([
         fetchPaprikaOhlcv(selected, "1h", 7),
-        fetchPaprikaOhlcv(selected, "24h", 7)
-      ]),
-      Promise.all([
-        fetchOhlcv(selected, 5, 12),
-        fetchOhlcv(selected, 30, 48),
-        fetchOhlcv(selected, 60, 168),
-        fetchOhlcv(selected, 1440, 10)
-      ])
-    ]);
-    const paprikaStatus = paprika.find((x) => x.rows.length)?.status ?? paprika.find((x) => x.status.status === "BLOCKED")?.status;
-    const geckoStatus = gecko.find((x) => x.rows.length)?.status ?? gecko.find((x) => x.status.status === "BLOCKED")?.status;
-    if (paprikaStatus) statuses.push({ ...paprikaStatus, transport: "PUBLIC_ENDPOINT" });
-    if (geckoStatus) statuses.push({ ...geckoStatus, transport: "PUBLIC_ENDPOINT" });
-    const paprikaReady = historyIsReady(paprika[2].rows, paprikaStatus?.status === "READY");
-    const geckoReady = historyIsReady(gecko[2].rows, geckoStatus?.status === "READY");
-    const primary = paprikaReady || !geckoReady ? paprika : gecko;
-    const secondary = primary === paprika ? gecko : paprika;
-    ohlcv5m = primary[0].rows.length ? primary[0].rows : secondary[0].rows;
-    ohlcv30m = primary[1].rows.length ? primary[1].rows : secondary[1].rows;
-    ohlcv1h = primary[2].rows.length ? primary[2].rows : secondary[2].rows;
-    ohlcv1d = primary[3].rows.length ? primary[3].rows : secondary[3].rows;
-    historyReady = paprikaReady || geckoReady;
+        fetchOhlcv(selected, 60, 168)
+      ]);
+      statuses.push({ ...paprika1h.status, transport: "PUBLIC_ENDPOINT" });
+      statuses.push({ ...gecko1h.status, transport: "PUBLIC_ENDPOINT" });
+      const paprikaReady = historyIsReady(paprika1h.rows, paprika1h.status.status === "READY");
+      const geckoReady = historyIsReady(gecko1h.rows, gecko1h.status.status === "READY");
+      ohlcv1h = paprikaReady || !geckoReady ? paprika1h.rows : gecko1h.rows;
+      historyReady = paprikaReady || geckoReady;
+    } else {
+      const [paprika, gecko] = await Promise.all([
+        Promise.all([
+          fetchPaprikaOhlcv(selected, "5m", 1),
+          fetchPaprikaOhlcv(selected, "30m", 1),
+          fetchPaprikaOhlcv(selected, "1h", 7),
+          fetchPaprikaOhlcv(selected, "24h", 7)
+        ]),
+        Promise.all([
+          fetchOhlcv(selected, 5, 12),
+          fetchOhlcv(selected, 30, 48),
+          fetchOhlcv(selected, 60, 168),
+          fetchOhlcv(selected, 1440, 10)
+        ])
+      ]);
+      const paprikaStatus = paprika.find((x) => x.rows.length)?.status ?? paprika.find((x) => x.status.status === "BLOCKED")?.status;
+      const geckoStatus = gecko.find((x) => x.rows.length)?.status ?? gecko.find((x) => x.status.status === "BLOCKED")?.status;
+      if (paprikaStatus) statuses.push({ ...paprikaStatus, transport: "PUBLIC_ENDPOINT" });
+      if (geckoStatus) statuses.push({ ...geckoStatus, transport: "PUBLIC_ENDPOINT" });
+      const paprikaReady = historyIsReady(paprika[2].rows, paprikaStatus?.status === "READY");
+      const geckoReady = historyIsReady(gecko[2].rows, geckoStatus?.status === "READY");
+      const primary = paprikaReady || !geckoReady ? paprika : gecko;
+      const secondary = primary === paprika ? gecko : paprika;
+      ohlcv5m = primary[0].rows.length ? primary[0].rows : secondary[0].rows;
+      ohlcv30m = primary[1].rows.length ? primary[1].rows : secondary[1].rows;
+      ohlcv1h = primary[2].rows.length ? primary[2].rows : secondary[2].rows;
+      ohlcv1d = primary[3].rows.length ? primary[3].rows : secondary[3].rows;
+      historyReady = paprikaReady || geckoReady;
+    }
   }
   const onchainEvidence = await onchainEvidencePromise;
   const price = selected?.priceUsd ?? (ohlcv1h.at(-1)?.close ?? null);
@@ -807,6 +820,7 @@ async function buildTruth(address2, options = {}) {
   ];
   const grade = gradeA ? "A" : baseB ? "B" : marketReady && historyReady ? "C" : marketReady ? "C" : "D";
   const failureState = !supportedChain ? "BLOCKED_DATA" : grade === "D" ? "BLOCKED_EVIDENCE" : null;
+  const recent24h = ohlcv30m.length ? ohlcv30m : ohlcv1h.slice(-24);
   return {
     schemaVersion: "lp-truth-v1",
     request: { tokenAddress: address2 },
@@ -816,7 +830,7 @@ async function buildTruth(address2, options = {}) {
     verifiedPools: verified.verifiedPools,
     onchainPool: verified.onchain,
     poolSelection: { method: "VERIFIED_CAPACITY_ADJUSTED_FEE_VELOCITY", verifiedCandidates: verified.verifiedPools.length, capacityLiquidityTargetUsd: CAPACITY_LIQUIDITY_TARGET_USD, feeBasis: "VOLUME_X_FEE_TIER_PROXY" },
-    market: { priceUsd: price, high24hUsd: max(ohlcv30m), low24hUsd: min(ohlcv30m), high7dUsd: max(ohlcv1h), low7dUsd: min(ohlcv1h), volume5mUsd: sum(ohlcv5m.slice(-1)), volume30mUsd: sum(ohlcv30m.slice(-1)), volume1hUsd: sum(ohlcv1h.slice(-1)), volume24hUsd: selected?.volume24hUsd ?? null, tvlUsd: selected?.liquidityUsd ?? null, activeLiquidityUsd: null, feeTier: verified.onchain?.feeTier ?? selected?.feeTier ?? null, poolAgeDays: selected?.poolAgeDays ?? null, tick: { current: verified.onchain?.currentTick ?? null, lower: null, upper: null }, holderFlow: null },
+    market: { priceUsd: price, high24hUsd: max(recent24h), low24hUsd: min(recent24h), high7dUsd: max(ohlcv1h), low7dUsd: min(ohlcv1h), volume5mUsd: sum(ohlcv5m.slice(-1)), volume30mUsd: sum(ohlcv30m.slice(-1)), volume1hUsd: sum(ohlcv1h.slice(-1)), volume24hUsd: selected?.volume24hUsd ?? null, tvlUsd: selected?.liquidityUsd ?? null, activeLiquidityUsd: null, feeTier: verified.onchain?.feeTier ?? selected?.feeTier ?? null, poolAgeDays: selected?.poolAgeDays ?? null, tick: { current: verified.onchain?.currentTick ?? null, lower: null, upper: null }, holderFlow: null },
     history: { ohlcv5m, ohlcv30m, ohlcv1h, ohlcv1d },
     onchainEvidence: { tickLiquidity: onchainEvidence?.tickLiquidity ?? null, feeGrowth: onchainEvidence?.feeGrowth ?? null, directionalSwaps: null },
     evidence: { grade, freshnessSeconds, conflicts, wickPenalty, sources: collapseStatuses(statuses), surfaceReceipts },
