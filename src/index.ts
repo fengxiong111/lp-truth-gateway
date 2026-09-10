@@ -97,6 +97,7 @@ export async function buildTruth(address: string): Promise<TruthArtifact> {
   statuses.push(...enhancements.map((x):SourceStatus=>({source:x.receipt.source,status:x.receipt.status,fetchedAt:x.fetchedAt,failureState:x.receipt.status==="READY"?null:"BLOCKED_EVIDENCE",error:x.receipt.error,transport:x.receipt.transport})));
 
   const price=selected?.priceUsd??(ohlcv1h.at(-1)?.close??null);
+  const supportedChain = selected === null || lower(selected.chainId) === "robinhood" || selected.chainId === "4663" || lower(selected.chainId) === "robinhood-chain";
   const conflicts=comparablePriceConflicts(candidates,selected);
   const latestHistoryTs=ohlcv1h.length?Math.max(...ohlcv1h.map((x)=>x.timestamp)):null;
   const freshnessSeconds=latestHistoryTs===null?null:Math.max(0,Math.floor(Date.now()/1000-latestHistoryTs));
@@ -115,6 +116,7 @@ export async function buildTruth(address: string): Promise<TruthArtifact> {
     {sourceUrl:verified.onchain?.poolAddress??null,transport:"RPC" as const,asOf:now(),contentSha256:hash(verified.onchain),blockNumber:onchainEvidence?.feeGrowth?.toBlock??onchainEvidence?.tickLiquidity?.blockNumber??null,rpcUrl:onchainEvidence?.feeGrowth?.rpcUrl??onchainEvidence?.tickLiquidity?.rpcUrl??null,conflicts, failureState:gradeA?null:"BLOCKED_EVIDENCE" as const},
   ];
   const grade:"A"|"B"|"C"|"D"=gradeA?"A":baseB?"B":marketReady&&historyReady?"C":marketReady?"C":"D";
+  const failureState = !supportedChain ? "BLOCKED_DATA" as const : grade === "D" ? "BLOCKED_EVIDENCE" as const : null;
 
   return {
     schemaVersion:"lp-truth-v1",request:{tokenAddress:address},timestamp:now(),selectedPool:selected,poolCandidates:candidates,verifiedPools:verified.verifiedPools,onchainPool:verified.onchain,
@@ -124,6 +126,6 @@ export async function buildTruth(address: string): Promise<TruthArtifact> {
     onchainEvidence:{tickLiquidity:onchainEvidence?.tickLiquidity??null,feeGrowth:onchainEvidence?.feeGrowth??null,directionalSwaps:null},
     evidence:{grade,freshnessSeconds,conflicts,wickPenalty,sources:collapseStatuses(statuses),surfaceReceipts},
     receipts:{source:sourceReceipts,truth:truthReceipts},
-    failureState:grade==="D"?"BLOCKED_EVIDENCE":null,
+    failureState,
   };
 }

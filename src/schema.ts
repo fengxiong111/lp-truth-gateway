@@ -1,5 +1,5 @@
 export type Nullable<T> = T | null;
-export type FailureState = "BLOCKED_DATA" | "BLOCKED_EVIDENCE" | "BLOCKED_AUTH" | "BLOCKED_EXECUTION";
+export type FailureState = "BLOCKED_DATA" | "BLOCKED_EVIDENCE" | "BLOCKED_AUTH" | "BLOCKED_EXECUTION" | "AMBIGUOUS_CHAIN";
 export type TruthSource = "dexscreener" | "dexpaprika" | "geckoterminal" | "uniswap" | "rpc" | "okx" | "revert" | "vfat";
 export type SourceTransport = "OFFICIAL_API" | "RPC" | "PUBLIC_ENDPOINT" | "DISCOVERED_ENDPOINT" | "HTML_DOM" | "BROWSER_DOM" | "NONE";
 export type SourceStatus = { source:TruthSource; status:"READY"|"BLOCKED"; fetchedAt:string; failureState:Nullable<FailureState>; error:Nullable<string>; transport?:SourceTransport };
