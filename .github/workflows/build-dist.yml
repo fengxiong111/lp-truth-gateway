@@ -1,0 +1,28 @@
+name: Build Dist
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['dist/**']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bundle request runtime
+        run: |
+          rm -rf dist
+          npx --yes esbuild@0.25.10 runner.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist/runner.mjs
+          node dist/runner.mjs 0x39dbed3a2bd333467115de45665cc57f813c4571 >/tmp/dist-smoke.json
+          test -s /tmp/dist-smoke.json
+      - name: Commit immutable dist
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -f dist/runner.mjs
+          git diff --cached --quiet && exit 0
+          git commit -m 'build: refresh prebundled truth runtime [skip ci]'
+          git push
