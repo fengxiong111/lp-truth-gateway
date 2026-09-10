@@ -1,7 +1,26 @@
 export type Nullable<T> = T | null;
 export type FailureState = "BLOCKED_DATA" | "BLOCKED_EVIDENCE" | "BLOCKED_AUTH" | "BLOCKED_EXECUTION";
 export type TruthSource = "dexscreener" | "dexpaprika" | "geckoterminal" | "uniswap" | "rpc" | "okx" | "revert" | "vfat";
-export type SourceStatus = { source: TruthSource; status:"READY"|"BLOCKED"; fetchedAt:string; failureState:Nullable<FailureState>; error:Nullable<string>; };
+export type SourceTransport = "OFFICIAL_API" | "RPC" | "PUBLIC_ENDPOINT" | "DISCOVERED_ENDPOINT" | "HTML_DOM" | "BROWSER_DOM" | "NONE";
+export type SourceStatus = {
+  source: TruthSource;
+  status:"READY"|"BLOCKED";
+  fetchedAt:string;
+  failureState:Nullable<FailureState>;
+  error:Nullable<string>;
+  transport?:SourceTransport;
+};
+export type SurfaceReceipt = {
+  source:TruthSource;
+  url:string;
+  transport:SourceTransport;
+  status:"READY"|"BLOCKED";
+  addressMatched:boolean;
+  structuredPayload:boolean;
+  discoveredEndpoints:number;
+  contentSha256:Nullable<string>;
+  error:Nullable<string>;
+};
 export type PoolCandidate = {
   chainId:Nullable<string>;
   dexId:Nullable<string>;
@@ -62,6 +81,13 @@ export type TruthArtifact = {
     holderFlow:Nullable<{inflowUsd:number;outflowUsd:number}>;
   };
   history:{ohlcv5m:Ohlcv[]; ohlcv30m:Ohlcv[]; ohlcv1h:Ohlcv[]; ohlcv1d:Ohlcv[]};
-  evidence:{grade:"A"|"B"|"C"|"D"; freshnessSeconds:Nullable<number>; conflicts:string[]; wickPenalty:boolean; sources:SourceStatus[];};
+  evidence:{
+    grade:"A"|"B"|"C"|"D";
+    freshnessSeconds:Nullable<number>;
+    conflicts:string[];
+    wickPenalty:boolean;
+    sources:SourceStatus[];
+    surfaceReceipts:SurfaceReceipt[];
+  };
   failureState:Nullable<FailureState>;
 };
