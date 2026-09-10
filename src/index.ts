@@ -1,18 +1,18 @@
 import { fetchUniswapV3State } from "./onchain.js";
 import { fetchDex, fetchOhlcv, fetchPaprikaOhlcv } from "./sources.js";
-import type { Ohlcv, PoolCandidate, SourceStatus, TruthArtifact } from "./schema.js";
+import type { Ohlcv, OnchainPoolTruth, PoolCandidate, SourceStatus, TruthArtifact } from "./schema.js";
 
 const now = () => new Date().toISOString();
-const max = (a: Ohlcv[]) => a.length ? Math.max(...a.map((x) => x.high)) : null;
-const min = (a: Ohlcv[]) => a.length ? Math.min(...a.map((x) => x.low)) : null;
-const sum = (a: Ohlcv[]) => a.length ? a.reduce((s, x) => s + x.volumeUsd, 0) : null;
+const max = (rows: Ohlcv[]) => rows.length ? Math.max(...rows.map((x) => x.high)) : null;
+const min = (rows: Ohlcv[]) => rows.length ? Math.min(...rows.map((x) => x.low)) : null;
+const sum = (rows: Ohlcv[]) => rows.length ? rows.reduce((total, x) => total + x.volumeUsd, 0) : null;
 const lower = (x: string | null) => x?.toLowerCase() ?? null;
+const isV3Address = (x: string) => /^0x[0-9a-fA-F]{40}$/.test(x);
 
 function comparablePriceConflicts(candidates: PoolCandidate[], selected: PoolCandidate | null): string[] {
   if (!selected?.priceUsd || selected.priceUsd <= 0) return [];
   const reference = selected.priceUsd;
-  const selectedLiquidity = selected.liquidityUsd ?? 0;
-  const liquidityFloor = Math.max(25_000, selectedLiquidity * 0.01);
+  const liquidityFloor = Math.max(25_000, (selected.liquidityUsd ?? 0) * 0.01);
   return candidates
     .filter((p) => p.poolAddress.toLowerCase() !== selected.poolAddress.toLowerCase())
     .filter((p) => lower(p.chainId) === lower(selected.chainId))
@@ -22,115 +22,166 @@ function comparablePriceConflicts(candidates: PoolCandidate[], selected: PoolCan
     .map((p) => `USD_PRICE_CONFLICT:${p.poolAddress}:${p.priceUsd}`);
 }
 
-async function selectVerifiedPool(candidates: PoolCandidate[]): Promise<{
+function toTruthPool(state: Awaited<ReturnType<typeof fetchUniswapV3State>>["state"]): OnchainPoolTruth | null {
+  return state ? {
+    chainId: state.chainId,
+    poolAddress: state.poolAddress,
+    factory: state.factory,
+    token0: state.token0,
+    token1: state.token1,
+    feeTier: state.feeTier,
+    tickSpacing: state.tickSpacing,
+    currentTick: state.currentTick,
+    sqrtPriceX96: state.sqrtPriceX96,
+    activeLiquidityRaw: state.activeLiquidityRaw,
+    canonical: state.canonical,
+  } : null;
+}
+
+function collapseStatuses(rows: SourceStatus[]): SourceStatus[] {
+  const sources = [...new Set(rows.map((x) => x.source))];
+  return sources.map((source) => {
+    const same = rows.filter((x) => x.source === source);
+    return same.find((x) => x.status === "READY") ?? same[0];
+  });
+}
+
+async function verifyPools(candidates: PoolCandidate[]): Promise<{
+  candidates: PoolCandidate[];
+  verifiedPools: OnchainPoolTruth[];
   selected: PoolCandidate | null;
-  onchain: TruthArtifact["onchainPool"];
+  onchain: OnchainPoolTruth | null;
   statuses: SourceStatus[];
 }> {
-  let lastStatuses: SourceStatus[] = [];
   const eligible = candidates
     .filter((p) => lower(p.chainId) === "robinhood" || p.chainId === "4663" || lower(p.chainId) === "robinhood-chain")
     .filter((p) => lower(p.dexId)?.includes("uniswap"))
-    .slice(0, 6);
+    .filter((p) => isV3Address(p.poolAddress))
+    .slice(0, 8);
 
-  for (const candidate of eligible) {
-    const proof = await fetchUniswapV3State(candidate);
-    lastStatuses = proof.statuses;
-    if (proof.state?.canonical) {
-      return {
-        selected: { ...candidate, feeTier: proof.state.feeTier },
-        onchain: {
-          chainId: proof.state.chainId,
-          poolAddress: proof.state.poolAddress,
-          factory: proof.state.factory,
-          token0: proof.state.token0,
-          token1: proof.state.token1,
-          feeTier: proof.state.feeTier,
-          tickSpacing: proof.state.tickSpacing,
-          currentTick: proof.state.currentTick,
-          sqrtPriceX96: proof.state.sqrtPriceX96,
-          activeLiquidityRaw: proof.state.activeLiquidityRaw,
-          canonical: proof.state.canonical,
-        },
-        statuses: proof.statuses,
-      };
+  const proofByPool = new Map<string, OnchainPoolTruth>();
+  const statuses: SourceStatus[] = [];
+  for (let i = 0; i < eligible.length; i += 2) {
+    const batch = await Promise.all(eligible.slice(i, i + 2).map((candidate) => fetchUniswapV3State(candidate)));
+    for (const result of batch) {
+      statuses.push(...result.statuses);
+      const proof = toTruthPool(result.state);
+      if (proof?.canonical) proofByPool.set(proof.poolAddress.toLowerCase(), proof);
     }
   }
 
-  return { selected: candidates[0] ?? null, onchain: null, statuses: lastStatuses.length ? lastStatuses : [
-    { source: "rpc", status: "BLOCKED", fetchedAt: now(), failureState: "BLOCKED_DATA", error: "NO_SUPPORTED_ONCHAIN_POOL" },
-    { source: "uniswap", status: "BLOCKED", fetchedAt: now(), failureState: "BLOCKED_EVIDENCE", error: "NO_CANONICAL_V3_POOL_PROOF" },
-  ] };
+  const enriched = candidates.map((candidate) => {
+    const proof = proofByPool.get(candidate.poolAddress.toLowerCase());
+    if (!proof) return candidate;
+    const grossFee24hUsd = candidate.volume24hUsd === null ? null : candidate.volume24hUsd * (proof.feeTier / 1_000_000);
+    const feeVelocity24h = grossFee24hUsd !== null && candidate.liquidityUsd !== null && candidate.liquidityUsd > 0
+      ? grossFee24hUsd / candidate.liquidityUsd
+      : null;
+    return { ...candidate, feeTier: proof.feeTier, grossFee24hUsd, feeVelocity24h };
+  });
+
+  const verifiedCandidates = enriched.filter((candidate) => proofByPool.has(candidate.poolAddress.toLowerCase()));
+  verifiedCandidates.sort((a, b) => {
+    const velocity = (b.feeVelocity24h ?? -1) - (a.feeVelocity24h ?? -1);
+    return velocity !== 0 ? velocity : (b.liquidityUsd ?? -1) - (a.liquidityUsd ?? -1);
+  });
+  const selected = verifiedCandidates[0] ?? enriched[0] ?? null;
+  const onchain = selected ? proofByPool.get(selected.poolAddress.toLowerCase()) ?? null : null;
+  const collapsed = collapseStatuses(statuses);
+
+  if (!collapsed.length) {
+    collapsed.push(
+      { source: "rpc", status: "BLOCKED", fetchedAt: now(), failureState: "BLOCKED_DATA", error: "NO_SUPPORTED_ONCHAIN_POOL" },
+      { source: "uniswap", status: "BLOCKED", fetchedAt: now(), failureState: "BLOCKED_EVIDENCE", error: "NO_CANONICAL_V3_POOL_PROOF" },
+    );
+  }
+
+  return {
+    candidates: enriched.sort((a, b) => {
+      const verifiedA = proofByPool.has(a.poolAddress.toLowerCase()) ? 1 : 0;
+      const verifiedB = proofByPool.has(b.poolAddress.toLowerCase()) ? 1 : 0;
+      if (verifiedA !== verifiedB) return verifiedB - verifiedA;
+      const velocity = (b.feeVelocity24h ?? -1) - (a.feeVelocity24h ?? -1);
+      return velocity !== 0 ? velocity : (b.liquidityUsd ?? -1) - (a.liquidityUsd ?? -1);
+    }),
+    verifiedPools: [...proofByPool.values()],
+    selected,
+    onchain,
+    statuses: collapsed,
+  };
 }
 
 export async function buildTruth(address: string): Promise<TruthArtifact> {
-  const d = await fetchDex(address);
-  const candidates = d.candidates.sort((a, b) => {
-    const liquidityDelta = (b.liquidityUsd ?? -1) - (a.liquidityUsd ?? -1);
-    return liquidityDelta !== 0 ? liquidityDelta : (b.volume24hUsd ?? -1) - (a.volume24hUsd ?? -1);
+  const dex = await fetchDex(address);
+  const discovered = dex.candidates.sort((a, b) => {
+    const liquidity = (b.liquidityUsd ?? -1) - (a.liquidityUsd ?? -1);
+    return liquidity !== 0 ? liquidity : (b.volume24hUsd ?? -1) - (a.volume24hUsd ?? -1);
   });
-
-  const verified = await selectVerifiedPool(candidates);
+  const verified = await verifyPools(discovered);
+  const candidates = verified.candidates;
   const selected = verified.selected;
   const statuses: SourceStatus[] = [
-    d.status,
+    dex.status,
     ...verified.statuses,
     { source: "okx", status: "BLOCKED", fetchedAt: now(), failureState: "BLOCKED_AUTH", error: "API_KEY_NOT_CONFIGURED" },
     { source: "revert", status: "BLOCKED", fetchedAt: now(), failureState: "BLOCKED_AUTH", error: "OPTIONAL_ADAPTER_NOT_CONFIGURED" },
     { source: "vfat", status: "BLOCKED", fetchedAt: now(), failureState: "BLOCKED_AUTH", error: "OPTIONAL_ADAPTER_NOT_CONFIGURED" },
   ];
 
-  let h1: Ohlcv[] = [];
-  let h24: Ohlcv[] = [];
-  let h7: Ohlcv[] = [];
-  let daily: Ohlcv[] = [];
+  let ohlcv5m: Ohlcv[] = [];
+  let ohlcv30m: Ohlcv[] = [];
+  let ohlcv1h: Ohlcv[] = [];
+  let ohlcv1d: Ohlcv[] = [];
   let historyReady = false;
 
   if (selected) {
-    const [a, b, c, e] = await Promise.all([
+    const paprika = await Promise.all([
       fetchPaprikaOhlcv(selected, "5m", 1),
       fetchPaprikaOhlcv(selected, "30m", 1),
       fetchPaprikaOhlcv(selected, "1h", 7),
       fetchPaprikaOhlcv(selected, "24h", 7),
     ]);
-    h1 = a.rows;
-    h24 = b.rows;
-    h7 = c.rows;
-    daily = e.rows;
-    const paprika = [a, b, c, e].find((x) => x.rows.length)?.status ?? [a, b, c, e].find((x) => x.status.status === "BLOCKED")?.status;
-    if (paprika) statuses.push(paprika);
-    historyReady = h7.length > 0 && paprika?.status === "READY";
+    [ohlcv5m, ohlcv30m, ohlcv1h, ohlcv1d] = paprika.map((x) => x.rows);
+    const paprikaStatus = paprika.find((x) => x.rows.length)?.status ?? paprika.find((x) => x.status.status === "BLOCKED")?.status;
+    if (paprikaStatus) statuses.push(paprikaStatus);
+    historyReady = ohlcv1h.length > 0 && paprikaStatus?.status === "READY";
 
     if (!historyReady) {
-      const [ga, gb, gc, gd] = await Promise.all([
+      const gecko = await Promise.all([
         fetchOhlcv(selected, 5, 12),
         fetchOhlcv(selected, 30, 48),
         fetchOhlcv(selected, 60, 168),
         fetchOhlcv(selected, 1440, 10),
       ]);
-      const gecko = [ga, gb, gc, gd].find((x) => x.rows.length)?.status ?? [ga, gb, gc, gd].find((x) => x.status.status === "BLOCKED")?.status;
-      if (gecko) statuses.push(gecko);
-      if (gc.rows.length) h7 = gc.rows;
-      if (gd.rows.length) daily = gd.rows;
-      if (ga.rows.length) h1 = ga.rows;
-      if (gb.rows.length) h24 = gb.rows;
-      historyReady = h7.length > 0 && gecko?.status === "READY";
+      const geckoStatus = gecko.find((x) => x.rows.length)?.status ?? gecko.find((x) => x.status.status === "BLOCKED")?.status;
+      if (geckoStatus) statuses.push(geckoStatus);
+      if (gecko[0].rows.length) ohlcv5m = gecko[0].rows;
+      if (gecko[1].rows.length) ohlcv30m = gecko[1].rows;
+      if (gecko[2].rows.length) ohlcv1h = gecko[2].rows;
+      if (gecko[3].rows.length) ohlcv1d = gecko[3].rows;
+      historyReady = ohlcv1h.length > 0 && geckoStatus?.status === "READY";
     }
   }
 
-  const price = selected?.priceUsd ?? (h7.at(-1)?.close ?? null);
+  const price = selected?.priceUsd ?? (ohlcv1h.at(-1)?.close ?? null);
   const conflicts = comparablePriceConflicts(candidates, selected);
-  const latestHistoryTs = h7.length ? Math.max(...h7.map((x) => x.timestamp)) : null;
-  const fresh = latestHistoryTs === null ? null : Math.max(0, Math.floor(Date.now() / 1000 - latestHistoryTs));
-  const wick = h7.some((x) => x.high > Math.max(x.open, x.close) * 1.25 || x.low < Math.min(x.open, x.close) * 0.75);
+  const latestHistoryTs = ohlcv1h.length ? Math.max(...ohlcv1h.map((x) => x.timestamp)) : null;
+  const freshnessSeconds = latestHistoryTs === null ? null : Math.max(0, Math.floor(Date.now() / 1000 - latestHistoryTs));
+  const wickPenalty = ohlcv1h.some((x) => x.high > Math.max(x.open, x.close) * 1.25 || x.low < Math.min(x.open, x.close) * 0.75);
   const onchainReady = Boolean(
     verified.onchain?.canonical &&
     verified.onchain.feeTier > 0 &&
     Number.isFinite(verified.onchain.currentTick) &&
     BigInt(verified.onchain.activeLiquidityRaw) > 0n,
   );
-  const marketReady = d.status.status === "READY";
-  const grade: "A" | "B" | "C" | "D" = marketReady && historyReady && onchainReady && conflicts.length === 0 ? "B" : marketReady && historyReady ? "C" : marketReady ? "C" : "D";
+  const marketReady = dex.status.status === "READY";
+  const grade: "A" | "B" | "C" | "D" = marketReady && historyReady && onchainReady && conflicts.length === 0
+    ? "B"
+    : marketReady && historyReady
+      ? "C"
+      : marketReady
+        ? "C"
+        : "D";
 
   return {
     schemaVersion: "lp-truth-v1",
@@ -138,16 +189,18 @@ export async function buildTruth(address: string): Promise<TruthArtifact> {
     timestamp: now(),
     selectedPool: selected,
     poolCandidates: candidates,
+    verifiedPools: verified.verifiedPools,
     onchainPool: verified.onchain,
+    poolSelection: { method: "VERIFIED_GROSS_FEE_VELOCITY", verifiedCandidates: verified.verifiedPools.length },
     market: {
       priceUsd: price,
-      high24hUsd: max(h24),
-      low24hUsd: min(h24),
-      high7dUsd: max(h7),
-      low7dUsd: min(h7),
-      volume5mUsd: sum(h1.slice(-1)),
-      volume30mUsd: sum(h24.slice(-1)),
-      volume1hUsd: sum(h7.slice(-1)),
+      high24hUsd: max(ohlcv30m),
+      low24hUsd: min(ohlcv30m),
+      high7dUsd: max(ohlcv1h),
+      low7dUsd: min(ohlcv1h),
+      volume5mUsd: sum(ohlcv5m.slice(-1)),
+      volume30mUsd: sum(ohlcv30m.slice(-1)),
+      volume1hUsd: sum(ohlcv1h.slice(-1)),
       volume24hUsd: selected?.volume24hUsd ?? null,
       tvlUsd: selected?.liquidityUsd ?? null,
       activeLiquidityUsd: null,
@@ -156,8 +209,8 @@ export async function buildTruth(address: string): Promise<TruthArtifact> {
       tick: { current: verified.onchain?.currentTick ?? null, lower: null, upper: null },
       holderFlow: null,
     },
-    history: { ohlcv5m: h1, ohlcv30m: h24, ohlcv1h: h7, ohlcv1d: daily },
-    evidence: { grade, freshnessSeconds: fresh, conflicts, wickPenalty: wick, sources: statuses },
+    history: { ohlcv5m, ohlcv30m, ohlcv1h, ohlcv1d },
+    evidence: { grade, freshnessSeconds, conflicts, wickPenalty, sources: collapseStatuses(statuses) },
     failureState: grade === "D" ? "BLOCKED_EVIDENCE" : null,
   };
 }
