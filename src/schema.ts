@@ -18,6 +18,7 @@ export type SurfaceReceipt = {
   addressMatched:boolean;
   structuredPayload:boolean;
   discoveredEndpoints:number;
+  discoveredEndpointPaths:string[];
   contentSha256:Nullable<string>;
   error:Nullable<string>;
 };
