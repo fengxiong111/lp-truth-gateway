@@ -2,6 +2,7 @@ import { fetchUniswapV3State } from "./onchain.js";
 import { fetchDex, fetchOhlcv, fetchPaprikaOhlcv } from "./sources.js";
 import type { Ohlcv, OnchainPoolTruth, PoolCandidate, SourceStatus, TruthArtifact } from "./schema.js";
 
+const CAPACITY_LIQUIDITY_TARGET_USD = 100_000;
 const now = () => new Date().toISOString();
 const max = (rows: Ohlcv[]) => rows.length ? Math.max(...rows.map((x) => x.high)) : null;
 const min = (rows: Ohlcv[]) => rows.length ? Math.min(...rows.map((x) => x.low)) : null;
@@ -73,17 +74,33 @@ async function verifyPools(candidates: PoolCandidate[]): Promise<{
   const enriched = candidates.map((candidate) => {
     const proof = proofByPool.get(candidate.poolAddress.toLowerCase());
     if (!proof) return candidate;
-    const grossFee24hUsd = candidate.volume24hUsd === null ? null : candidate.volume24hUsd * (proof.feeTier / 1_000_000);
+    const grossFee24hUsd = candidate.volume24hUsd === null
+      ? null
+      : candidate.volume24hUsd * (proof.feeTier / 1_000_000);
     const feeVelocity24h = grossFee24hUsd !== null && candidate.liquidityUsd !== null && candidate.liquidityUsd > 0
       ? grossFee24hUsd / candidate.liquidityUsd
       : null;
-    return { ...candidate, feeTier: proof.feeTier, grossFee24hUsd, feeVelocity24h };
+    const capacityFactor = candidate.liquidityUsd === null
+      ? null
+      : Math.min(1, candidate.liquidityUsd / CAPACITY_LIQUIDITY_TARGET_USD);
+    const capacityAdjustedFeeVelocity24h = feeVelocity24h === null || capacityFactor === null
+      ? null
+      : feeVelocity24h * capacityFactor;
+    return {
+      ...candidate,
+      feeTier: proof.feeTier,
+      grossFee24hUsd,
+      feeVelocity24h,
+      capacityAdjustedFeeVelocity24h,
+    };
   });
 
   const verifiedCandidates = enriched.filter((candidate) => proofByPool.has(candidate.poolAddress.toLowerCase()));
   verifiedCandidates.sort((a, b) => {
-    const velocity = (b.feeVelocity24h ?? -1) - (a.feeVelocity24h ?? -1);
-    return velocity !== 0 ? velocity : (b.liquidityUsd ?? -1) - (a.liquidityUsd ?? -1);
+    const adjusted = (b.capacityAdjustedFeeVelocity24h ?? -1) - (a.capacityAdjustedFeeVelocity24h ?? -1);
+    if (adjusted !== 0) return adjusted;
+    const rawVelocity = (b.feeVelocity24h ?? -1) - (a.feeVelocity24h ?? -1);
+    return rawVelocity !== 0 ? rawVelocity : (b.liquidityUsd ?? -1) - (a.liquidityUsd ?? -1);
   });
   const selected = verifiedCandidates[0] ?? enriched[0] ?? null;
   const onchain = selected ? proofByPool.get(selected.poolAddress.toLowerCase()) ?? null : null;
@@ -101,8 +118,8 @@ async function verifyPools(candidates: PoolCandidate[]): Promise<{
       const verifiedA = proofByPool.has(a.poolAddress.toLowerCase()) ? 1 : 0;
       const verifiedB = proofByPool.has(b.poolAddress.toLowerCase()) ? 1 : 0;
       if (verifiedA !== verifiedB) return verifiedB - verifiedA;
-      const velocity = (b.feeVelocity24h ?? -1) - (a.feeVelocity24h ?? -1);
-      return velocity !== 0 ? velocity : (b.liquidityUsd ?? -1) - (a.liquidityUsd ?? -1);
+      const adjusted = (b.capacityAdjustedFeeVelocity24h ?? -1) - (a.capacityAdjustedFeeVelocity24h ?? -1);
+      return adjusted !== 0 ? adjusted : (b.liquidityUsd ?? -1) - (a.liquidityUsd ?? -1);
     }),
     verifiedPools: [...proofByPool.values()],
     selected,
@@ -191,7 +208,12 @@ export async function buildTruth(address: string): Promise<TruthArtifact> {
     poolCandidates: candidates,
     verifiedPools: verified.verifiedPools,
     onchainPool: verified.onchain,
-    poolSelection: { method: "VERIFIED_GROSS_FEE_VELOCITY", verifiedCandidates: verified.verifiedPools.length },
+    poolSelection: {
+      method: "VERIFIED_CAPACITY_ADJUSTED_FEE_VELOCITY",
+      verifiedCandidates: verified.verifiedPools.length,
+      capacityLiquidityTargetUsd: CAPACITY_LIQUIDITY_TARGET_USD,
+      feeBasis: "VOLUME_X_FEE_TIER_PROXY",
+    },
     market: {
       priceUsd: price,
       high24hUsd: max(ohlcv30m),
