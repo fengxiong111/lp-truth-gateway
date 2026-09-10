@@ -94,7 +94,7 @@ export async function buildTruth(address: string): Promise<TruthArtifact> {
 
   const [enhancements,onchainEvidence]=await Promise.all([enhancementPromise,onchainEvidencePromise]);
   const surfaceReceipts=enhancements.map((x)=>x.receipt);
-  statuses.push(...enhancements.map((x):SourceStatus=>({source:x.receipt.source,status:x.receipt.status,fetchedAt:x.fetchedAt,failureState:x.receipt.status==="READY"?null:"BLOCKED_EVIDENCE",error:x.receipt.error,transport:x.receipt.transport})));
+  statuses.push(...enhancements.map((x):SourceStatus=>({source:x.receipt.source,status:x.receipt.status,fetchedAt:x.fetchedAt,failureState:x.receipt.status==="READY"?null:"BLOCKED_EVIDENCE",error:x.receipt.error,transport:x.receipt.transport,url:x.receipt.url,contentSha256:x.receipt.contentSha256})));
 
   const price=selected?.priceUsd??(ohlcv1h.at(-1)?.close??null);
   const supportedChain = selected === null || lower(selected.chainId) === "robinhood" || selected.chainId === "4663" || lower(selected.chainId) === "robinhood-chain";
@@ -108,8 +108,8 @@ export async function buildTruth(address: string): Promise<TruthArtifact> {
   const feeGrowthA=Boolean(onchainEvidence?.feeGrowth.verified&&(onchainEvidence.feeGrowth.observedWindowSeconds??0)>=5&&onchainEvidence.feeGrowth.feeGrowthGlobal0X128DeltaRaw!==null&&onchainEvidence.feeGrowth.feeGrowthGlobal1X128DeltaRaw!==null);
   const gradeA=Boolean(baseB&&onchainEvidence?.tickLiquidity.verified&&feeGrowthA);
   const sourceReceipts=statuses.map((s)=>({
-    source:s.source,transport:s.transport??null,url:null,fetchedAt:s.fetchedAt,status:s.status,
-    failureState:s.failureState,error:s.error,contentSha256:null,
+    source:s.source,transport:s.transport??null,url:s.url??null,fetchedAt:s.fetchedAt,status:s.status,
+    failureState:s.failureState,error:s.error,contentSha256:s.contentSha256??null,
   }));
   const truthReceipts=[
     {sourceUrl:null,transport:"PUBLIC_ENDPOINT" as const,asOf:latestHistoryTs===null?null:new Date(latestHistoryTs*1000).toISOString(),contentSha256:hash({ohlcv5m,ohlcv30m,ohlcv1h,ohlcv1d}),blockNumber:null,rpcUrl:null,conflicts, failureState:historyReady?null:"BLOCKED_EVIDENCE" as const},

@@ -47,7 +47,7 @@ export async function fetchDex(address: string): Promise<{ candidates: PoolCandi
       status: candidates.length ? "READY" : "BLOCKED",
       fetchedAt: now(),
       failureState: candidates.length ? null : "BLOCKED_DATA",
-      error: candidates.length ? null : (r.error ?? "NO_POOL"),
+      error: candidates.length ? null : (r.error ?? "NO_POOL"), url: `https://api.dexscreener.com/latest/dex/tokens/${address}`,
     },
   };
 }
@@ -76,7 +76,7 @@ export async function fetchOhlcv(pool: PoolCandidate, aggregate: number, limit: 
       status: out.length ? "READY" : "BLOCKED",
       fetchedAt: now(),
       failureState: out.length ? null : (r.error ? "BLOCKED_EXECUTION" : "BLOCKED_EVIDENCE"),
-      error: out.length ? null : (r.error ?? "NO_OHLCV"),
+      error: out.length ? null : (r.error ?? "NO_OHLCV"), url: `https://api.geckoterminal.com/api/v2/networks/${pool.chainId ?? ""}/pools/${pool.poolAddress}/ohlcv/hour`,
     },
   };
 }
@@ -102,7 +102,7 @@ export async function fetchPaprikaOhlcv(pool: PoolCandidate, interval: "5m" | "3
       status: out.length ? "READY" : "BLOCKED",
       fetchedAt: now(),
       failureState: out.length ? null : (r.error ? "BLOCKED_EXECUTION" : "BLOCKED_EVIDENCE"),
-      error: out.length ? null : (r.error ?? "NO_OHLCV"),
+      error: out.length ? null : (r.error ?? "NO_OHLCV"), url: `https://api.dexpaprika.com/networks/${pool.chainId ?? ""}/pools/${pool.poolAddress.toLowerCase()}/ohlcv`,
     },
   };
 }
