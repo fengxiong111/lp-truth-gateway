@@ -37,9 +37,7 @@ function safeUrl(raw: string, allowedHosts: string[]): URL | null {
     return u;
   } catch { return null; }
 }
-function safePath(raw: string): string | null {
-  try { const u = new URL(raw); return `${u.origin}${u.pathname}`; } catch { return null; }
-}
+function safePath(raw: string): string | null { try { const u = new URL(raw); return `${u.origin}${u.pathname}`; } catch { return null; } }
 
 async function getText(url: string): Promise<{ text: string | null; contentType: string; error: string | null }> {
   try {
@@ -52,7 +50,6 @@ async function getText(url: string): Promise<{ text: string | null; contentType:
 
 function parseJson(text: string): unknown { try { return JSON.parse(text); } catch { return null; } }
 function decodeEntities(text: string): string { return text.replace(/&quot;/g, '"').replace(/&#34;/g, '"').replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">"); }
-
 function embeddedJson(html: string): unknown {
   const scripts = [...html.matchAll(/<script\b[^>]*(?:type=["']application\/(?:json|ld\+json)["']|id=["']__NEXT_DATA__["'])[^>]*>([\s\S]*?)<\/script>/gi)];
   const out: unknown[] = [];
@@ -65,11 +62,7 @@ function embeddedJson(html: string): unknown {
 
 function discoverEndpoints(html: string, base: URL, allowedHosts: string[]): string[] {
   const raw = new Set<string>();
-  const patterns = [
-    /https:\/\/[^"'\s<>\\]+/g,
-    /["'](\/[^"']*(?:api|graphql|_next\/data)[^"']*)["']/gi,
-    /(?:fetch|axios\.(?:get|post))\(\s*["']([^"']+)["']/gi,
-  ];
+  const patterns = [/https:\/\/[^"'\s<>\\]+/g, /["'](\/[^"']*(?:api|graphql|_next\/data)[^"']*)["']/gi, /(?:fetch|axios\.(?:get|post))\(\s*["']([^"']+)["']/gi];
   for (const pattern of patterns) for (const m of html.matchAll(pattern)) raw.add(m[1] ?? m[0]);
   const out: string[] = [];
   for (const value of raw) {
@@ -107,11 +100,7 @@ async function browserDump(url: string, allowedHosts: string[]): Promise<{ html:
   const dir = await mkdtemp(join(tmpdir(), "lp-surface-"));
   const netlog = join(dir, "netlog.json");
   try {
-    const { stdout } = await execFileAsync(chrome, [
-      "--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
-      `--user-data-dir=${dir}`, `--log-net-log=${netlog}`, "--net-log-capture-mode=Default",
-      "--virtual-time-budget=6000", "--dump-dom", url,
-    ], { timeout: 15_000, maxBuffer: MAX_BODY });
+    const { stdout } = await execFileAsync(chrome, ["--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", `--user-data-dir=${dir}`, `--log-net-log=${netlog}`, "--net-log-capture-mode=Default", "--virtual-time-budget=6000", "--dump-dom", url], { timeout: 15_000, maxBuffer: MAX_BODY });
     let endpointUrls = discoverEndpoints(stdout, new URL(url), allowedHosts);
     try {
       const log = JSON.parse(await readFile(netlog, "utf8")) as { events?: Array<{ params?: { url?: string } }> };
@@ -124,17 +113,20 @@ async function browserDump(url: string, allowedHosts: string[]): Promise<{ html:
 }
 
 function receipt(source: TruthSource, url: string, transport: SourceTransport, text: string | null, structured: unknown, endpoints: string[], tokenAddress: string, error: string | null): SurfaceReceipt {
-  const matched = text?.toLowerCase().includes(tokenAddress.toLowerCase()) ?? false;
+  const addressMatched = text?.toLowerCase().includes(tokenAddress.toLowerCase()) ?? false;
+  const structuredPayload = structured !== null;
+  const transportReady = text !== null;
+  const ready = transportReady && addressMatched && structuredPayload;
   const paths = [...new Set(endpoints.map(safePath).filter((x): x is string => Boolean(x)))].slice(0, 8);
   return {
-    source, url, transport,
-    status: matched ? "READY" : "BLOCKED",
-    addressMatched: matched,
-    structuredPayload: structured !== null,
+    source, url, transport, transportReady,
+    status: ready ? "READY" : "BLOCKED",
+    addressMatched,
+    structuredPayload,
     discoveredEndpoints: endpoints.length,
     discoveredEndpointPaths: paths,
     contentSha256: text ? sha(text) : null,
-    error: matched ? null : (error ?? "TOKEN_NOT_FOUND_ON_PUBLIC_SURFACE"),
+    error: ready ? null : (addressMatched && transportReady ? "UNSTRUCTURED_SURFACE_ONLY" : (error ?? "TOKEN_NOT_FOUND_ON_PUBLIC_SURFACE")),
   };
 }
 
@@ -145,19 +137,16 @@ export async function readPublicSurface(options: Options): Promise<SurfaceRead> 
     const r = receipt(source, options.url, "NONE", null, null, [], tokenAddress, "UNSAFE_OR_UNAPPROVED_URL");
     return { receipt: r, fetchedAt: now(), text: null, structured: null, endpointUrls: [] };
   }
-
   const direct = await getText(base.toString());
   if (!direct.text) {
     const r = receipt(source, base.toString(), "NONE", null, null, [], tokenAddress, direct.error);
     return { receipt: r, fetchedAt: now(), text: null, structured: null, endpointUrls: [] };
   }
-
   const directJson = /json/i.test(direct.contentType) ? parseJson(direct.text) : null;
   if (directJson !== null && direct.text.toLowerCase().includes(tokenAddress.toLowerCase())) {
     const r = receipt(source, base.toString(), "PUBLIC_ENDPOINT", direct.text, directJson, [], tokenAddress, null);
     return { receipt: r, fetchedAt: now(), text: direct.text, structured: directJson, endpointUrls: [] };
   }
-
   const embedded = embeddedJson(direct.text);
   const staticEndpoints = discoverEndpoints(direct.text, base, allowedHosts);
   const endpoint = await readDiscoveredEndpoint(staticEndpoints, tokenAddress);
@@ -169,7 +158,6 @@ export async function readPublicSurface(options: Options): Promise<SurfaceRead> 
     const r = receipt(source, base.toString(), "HTML_DOM", direct.text, embedded, staticEndpoints, tokenAddress, null);
     return { receipt: r, fetchedAt: now(), text: direct.text, structured: embedded, endpointUrls: staticEndpoints };
   }
-
   if (options.browserFallback !== false) {
     const browser = await browserDump(base.toString(), allowedHosts);
     if (browser) {
@@ -183,7 +171,6 @@ export async function readPublicSurface(options: Options): Promise<SurfaceRead> 
       return { receipt: r, fetchedAt: now(), text: browser.html, structured: rendered, endpointUrls: browser.endpointUrls };
     }
   }
-
   const r = receipt(source, base.toString(), "HTML_DOM", direct.text, embedded, staticEndpoints, tokenAddress, "TOKEN_NOT_FOUND_ON_PUBLIC_SURFACE");
   return { receipt: r, fetchedAt: now(), text: direct.text, structured: embedded, endpointUrls: staticEndpoints };
 }
@@ -191,12 +178,6 @@ export async function readPublicSurface(options: Options): Promise<SurfaceRead> 
 export async function probePublicEnhancements(tokenAddress: string): Promise<SurfaceRead[]> {
   const address = tokenAddress.toLowerCase();
   return Promise.all([
-    readPublicSurface({
-      source: "revert",
-      url: `https://revert.finance/discover?pool=${encodeURIComponent(address)}`,
-      tokenAddress: address,
-      allowedHosts: ["revert.finance", "www.revert.finance"],
-      browserFallback: process.env.LP_BROWSER_FALLBACK !== "0",
-    }),
+    readPublicSurface({ source: "revert", url: `https://revert.finance/discover?pool=${encodeURIComponent(address)}`, tokenAddress: address, allowedHosts: ["revert.finance", "www.revert.finance"], browserFallback: process.env.LP_BROWSER_FALLBACK !== "0" }),
   ]);
 }
