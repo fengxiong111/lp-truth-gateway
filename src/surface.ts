@@ -37,23 +37,21 @@ function safeUrl(raw: string, allowedHosts: string[]): URL | null {
     return u;
   } catch { return null; }
 }
+function safePath(raw: string): string | null {
+  try { const u = new URL(raw); return `${u.origin}${u.pathname}`; } catch { return null; }
+}
 
 async function getText(url: string): Promise<{ text: string | null; contentType: string; error: string | null }> {
   try {
-    const r = await fetch(url, { headers: { accept: "application/json,text/html;q=0.9,*/*;q=0.5", "user-agent": UA }, signal: AbortSignal.timeout(15_000) });
+    const r = await fetch(url, { headers: { accept: "application/json,text/html;q=0.9,*/*;q=0.5", "user-agent": UA }, signal: AbortSignal.timeout(12_000) });
     if (!r.ok) return { text: null, contentType: r.headers.get("content-type") ?? "", error: `HTTP_${r.status}` };
     const text = (await r.text()).slice(0, MAX_BODY);
     return { text, contentType: r.headers.get("content-type") ?? "", error: null };
   } catch (e) { return { text: null, contentType: "", error: e instanceof Error ? e.message : "FETCH_FAILED" }; }
 }
 
-function parseJson(text: string): unknown {
-  try { return JSON.parse(text); } catch { return null; }
-}
-
-function decodeEntities(text: string): string {
-  return text.replace(/&quot;/g, '"').replace(/&#34;/g, '"').replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
-}
+function parseJson(text: string): unknown { try { return JSON.parse(text); } catch { return null; } }
+function decodeEntities(text: string): string { return text.replace(/&quot;/g, '"').replace(/&#34;/g, '"').replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">"); }
 
 function embeddedJson(html: string): unknown {
   const scripts = [...html.matchAll(/<script\b[^>]*(?:type=["']application\/(?:json|ld\+json)["']|id=["']__NEXT_DATA__["'])[^>]*>([\s\S]*?)<\/script>/gi)];
@@ -92,8 +90,7 @@ async function readDiscoveredEndpoint(urls: string[], tokenAddress: string): Pro
     if (!r.text) continue;
     const parsed = parseJson(r.text);
     if (parsed === null) continue;
-    const body = r.text.toLowerCase();
-    if (body.includes(token)) return { text: r.text, structured: parsed, url };
+    if (r.text.toLowerCase().includes(token)) return { text: r.text, structured: parsed, url };
   }
   return null;
 }
@@ -113,11 +110,11 @@ async function browserDump(url: string, allowedHosts: string[]): Promise<{ html:
     const { stdout } = await execFileAsync(chrome, [
       "--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
       `--user-data-dir=${dir}`, `--log-net-log=${netlog}`, "--net-log-capture-mode=Default",
-      "--virtual-time-budget=8000", "--dump-dom", url,
-    ], { timeout: 20_000, maxBuffer: MAX_BODY });
+      "--virtual-time-budget=6000", "--dump-dom", url,
+    ], { timeout: 15_000, maxBuffer: MAX_BODY });
     let endpointUrls = discoverEndpoints(stdout, new URL(url), allowedHosts);
     try {
-      const log = JSON.parse(await readFile(netlog, "utf8")) as { events?: Array<{ params?: { url?: string; method?: string } }> };
+      const log = JSON.parse(await readFile(netlog, "utf8")) as { events?: Array<{ params?: { url?: string } }> };
       const observed = (log.events ?? []).flatMap((e) => e.params?.url ? [e.params.url] : []).filter((x) => Boolean(safeUrl(x, allowedHosts)));
       endpointUrls = [...new Set([...endpointUrls, ...observed.filter((x) => /(api|graphql|pool|position|analytics|discover)/i.test(x))])].slice(0, MAX_ENDPOINTS);
     } catch { /* netlog is optional evidence */ }
@@ -128,12 +125,14 @@ async function browserDump(url: string, allowedHosts: string[]): Promise<{ html:
 
 function receipt(source: TruthSource, url: string, transport: SourceTransport, text: string | null, structured: unknown, endpoints: string[], tokenAddress: string, error: string | null): SurfaceReceipt {
   const matched = text?.toLowerCase().includes(tokenAddress.toLowerCase()) ?? false;
+  const paths = [...new Set(endpoints.map(safePath).filter((x): x is string => Boolean(x)))].slice(0, 8);
   return {
     source, url, transport,
     status: matched ? "READY" : "BLOCKED",
     addressMatched: matched,
     structuredPayload: structured !== null,
     discoveredEndpoints: endpoints.length,
+    discoveredEndpointPaths: paths,
     contentSha256: text ? sha(text) : null,
     error: matched ? null : (error ?? "TOKEN_NOT_FOUND_ON_PUBLIC_SURFACE"),
   };
@@ -197,7 +196,7 @@ export async function probePublicEnhancements(tokenAddress: string): Promise<Sur
       url: `https://revert.finance/discover?pool=${encodeURIComponent(address)}`,
       tokenAddress: address,
       allowedHosts: ["revert.finance", "www.revert.finance"],
-      browserFallback: true,
+      browserFallback: process.env.LP_BROWSER_FALLBACK !== "0",
     }),
   ]);
 }
