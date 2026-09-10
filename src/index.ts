@@ -100,7 +100,8 @@ export async function buildTruth(address: string): Promise<TruthArtifact> {
   const onchainReady=Boolean(verified.onchain?.canonical&&verified.onchain.feeTier>0&&Number.isFinite(verified.onchain.currentTick)&&BigInt(verified.onchain.activeLiquidityRaw)>0n);
   const marketReady=dex.status.status==="READY";
   const baseB=marketReady&&historyReady&&onchainReady&&conflicts.length===0;
-  const gradeA=Boolean(baseB&&onchainEvidence?.tickLiquidity.verified&&onchainEvidence?.feeGrowth.verified&&onchainEvidence.feeGrowth.archiveReadVerified);
+  const feeGrowthA=Boolean(onchainEvidence?.feeGrowth.verified&&(onchainEvidence.feeGrowth.observedWindowSeconds??0)>=5&&onchainEvidence.feeGrowth.feeGrowthGlobal0X128DeltaRaw!==null&&onchainEvidence.feeGrowth.feeGrowthGlobal1X128DeltaRaw!==null);
+  const gradeA=Boolean(baseB&&onchainEvidence?.tickLiquidity.verified&&feeGrowthA);
   const grade:"A"|"B"|"C"|"D"=gradeA?"A":baseB?"B":marketReady&&historyReady?"C":marketReady?"C":"D";
 
   return {
