@@ -32,6 +32,8 @@ export async function fetchDex(address: string): Promise<{ candidates: PoolCandi
       volume24hUsd: n(p.volume?.h24),
       liquidityUsd: n(p.liquidity?.usd),
       feeTier: null,
+      grossFee24hUsd: null,
+      feeVelocity24h: null,
       poolAgeDays: n(p.pairCreatedAt) ? (Date.now() - Number(p.pairCreatedAt)) / 86400000 : null,
       source: "dexscreener",
     } satisfies PoolCandidate;
