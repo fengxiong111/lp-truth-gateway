@@ -15,6 +15,8 @@ export type PoolCandidate = {
   volume24hUsd:Nullable<number>;
   liquidityUsd:Nullable<number>;
   feeTier:Nullable<number>;
+  grossFee24hUsd:Nullable<number>;
+  feeVelocity24h:Nullable<number>;
   poolAgeDays:Nullable<number>;
   source:string;
 };
@@ -38,7 +40,9 @@ export type TruthArtifact = {
   timestamp:string;
   selectedPool:Nullable<PoolCandidate>;
   poolCandidates:PoolCandidate[];
+  verifiedPools:OnchainPoolTruth[];
   onchainPool:Nullable<OnchainPoolTruth>;
+  poolSelection:{method:"VERIFIED_GROSS_FEE_VELOCITY"; verifiedCandidates:number};
   market:{
     priceUsd:Nullable<number>;
     high24hUsd:Nullable<number>;
