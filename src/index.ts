@@ -68,8 +68,6 @@ async function verifyPools(candidates: PoolCandidate[], preferredPool?: string |
   const proofByPool = new Map<string, OnchainPoolTruth>();
   const statuses: SourceStatus[] = [];
 
-  // A position-supplied pool is authoritative for this request. Never spend latency
-  // verifying unrelated pools before returning its market overlay.
   if(preferred){
     const preferredIsRobinhood=lower(preferred.chainId)==="robinhood"||preferred.chainId==="4663"||lower(preferred.chainId)==="robinhood-chain";
     const preferredIsV3=preferredIsRobinhood&&Boolean(lower(preferred.dexId)?.includes("uniswap"))&&isV3Address(preferred.poolAddress);
@@ -128,8 +126,8 @@ export async function buildTruth(address: string, options: BuildTruthOptions = {
   const discovered=dex.candidates.sort((a,b)=>{const liquidity=(b.liquidityUsd??-1)-(a.liquidityUsd??-1);return liquidity!==0?liquidity:(b.volume24hUsd??-1)-(a.volume24hUsd??-1);});
   const verified=await verifyPools(discovered, options.preferredPool, fast);
   const candidates=verified.candidates,selected=verified.selected;
-  const onchainEvidencePromise=verified.onchain
-    ? fetchOnchainEvidence(verified.onchain,{allowLiveFeeGrowth:!fast})
+  const onchainEvidencePromise=!fast&&verified.onchain
+    ? fetchOnchainEvidence(verified.onchain,{allowLiveFeeGrowth:true})
     : Promise.resolve(null);
   const statuses:SourceStatus[]=[
     {...dex.status,transport:"PUBLIC_ENDPOINT"},
@@ -141,36 +139,46 @@ export async function buildTruth(address: string, options: BuildTruthOptions = {
   let ohlcv5m:Ohlcv[]=[],ohlcv30m:Ohlcv[]=[],ohlcv1h:Ohlcv[]=[],ohlcv1d:Ohlcv[]=[];
   let historyReady=false;
   if(selected){
-    // Paprika and Gecko are independent authorities/fallbacks: start both now.
-    // This removes the old 6-20s serial fallback tail on exact-pool requests.
-    const [paprika,gecko]=await Promise.all([
-      Promise.all([
-        fetchPaprikaOhlcv(selected,"5m",1),
-        fetchPaprikaOhlcv(selected,"30m",1),
+    if(fast){
+      const [paprika1h,gecko1h]=await Promise.all([
         fetchPaprikaOhlcv(selected,"1h",7),
-        fetchPaprikaOhlcv(selected,"24h",7)
-      ]),
-      Promise.all([
-        fetchOhlcv(selected,5,12),
-        fetchOhlcv(selected,30,48),
-        fetchOhlcv(selected,60,168),
-        fetchOhlcv(selected,1440,10)
-      ])
-    ]);
-    const paprikaStatus=paprika.find((x)=>x.rows.length)?.status??paprika.find((x)=>x.status.status==="BLOCKED")?.status;
-    const geckoStatus=gecko.find((x)=>x.rows.length)?.status??gecko.find((x)=>x.status.status==="BLOCKED")?.status;
-    if(paprikaStatus)statuses.push({...paprikaStatus,transport:"PUBLIC_ENDPOINT"});
-    if(geckoStatus)statuses.push({...geckoStatus,transport:"PUBLIC_ENDPOINT"});
-
-    const paprikaReady=historyIsReady(paprika[2].rows,paprikaStatus?.status==="READY");
-    const geckoReady=historyIsReady(gecko[2].rows,geckoStatus?.status==="READY");
-    const primary=paprikaReady||!geckoReady?paprika:gecko;
-    const secondary=primary===paprika?gecko:paprika;
-    ohlcv5m=primary[0].rows.length?primary[0].rows:secondary[0].rows;
-    ohlcv30m=primary[1].rows.length?primary[1].rows:secondary[1].rows;
-    ohlcv1h=primary[2].rows.length?primary[2].rows:secondary[2].rows;
-    ohlcv1d=primary[3].rows.length?primary[3].rows:secondary[3].rows;
-    historyReady=paprikaReady||geckoReady;
+        fetchOhlcv(selected,60,168)
+      ]);
+      statuses.push({...paprika1h.status,transport:"PUBLIC_ENDPOINT"});
+      statuses.push({...gecko1h.status,transport:"PUBLIC_ENDPOINT"});
+      const paprikaReady=historyIsReady(paprika1h.rows,paprika1h.status.status==="READY");
+      const geckoReady=historyIsReady(gecko1h.rows,gecko1h.status.status==="READY");
+      ohlcv1h=paprikaReady||!geckoReady?paprika1h.rows:gecko1h.rows;
+      historyReady=paprikaReady||geckoReady;
+    }else{
+      const [paprika,gecko]=await Promise.all([
+        Promise.all([
+          fetchPaprikaOhlcv(selected,"5m",1),
+          fetchPaprikaOhlcv(selected,"30m",1),
+          fetchPaprikaOhlcv(selected,"1h",7),
+          fetchPaprikaOhlcv(selected,"24h",7)
+        ]),
+        Promise.all([
+          fetchOhlcv(selected,5,12),
+          fetchOhlcv(selected,30,48),
+          fetchOhlcv(selected,60,168),
+          fetchOhlcv(selected,1440,10)
+        ])
+      ]);
+      const paprikaStatus=paprika.find((x)=>x.rows.length)?.status??paprika.find((x)=>x.status.status==="BLOCKED")?.status;
+      const geckoStatus=gecko.find((x)=>x.rows.length)?.status??gecko.find((x)=>x.status.status==="BLOCKED")?.status;
+      if(paprikaStatus)statuses.push({...paprikaStatus,transport:"PUBLIC_ENDPOINT"});
+      if(geckoStatus)statuses.push({...geckoStatus,transport:"PUBLIC_ENDPOINT"});
+      const paprikaReady=historyIsReady(paprika[2].rows,paprikaStatus?.status==="READY");
+      const geckoReady=historyIsReady(gecko[2].rows,geckoStatus?.status==="READY");
+      const primary=paprikaReady||!geckoReady?paprika:gecko;
+      const secondary=primary===paprika?gecko:paprika;
+      ohlcv5m=primary[0].rows.length?primary[0].rows:secondary[0].rows;
+      ohlcv30m=primary[1].rows.length?primary[1].rows:secondary[1].rows;
+      ohlcv1h=primary[2].rows.length?primary[2].rows:secondary[2].rows;
+      ohlcv1d=primary[3].rows.length?primary[3].rows:secondary[3].rows;
+      historyReady=paprikaReady||geckoReady;
+    }
   }
 
   const onchainEvidence=await onchainEvidencePromise;
@@ -203,11 +211,12 @@ export async function buildTruth(address: string, options: BuildTruthOptions = {
   ];
   const grade:"A"|"B"|"C"|"D"=gradeA?"A":baseB?"B":marketReady&&historyReady?"C":marketReady?"C":"D";
   const failureState = !supportedChain ? "BLOCKED_DATA" as const : grade === "D" ? "BLOCKED_EVIDENCE" as const : null;
+  const recent24h=ohlcv30m.length?ohlcv30m:ohlcv1h.slice(-24);
 
   return {
     schemaVersion:"lp-truth-v1",request:{tokenAddress:address},timestamp:now(),selectedPool:selected,poolCandidates:candidates,verifiedPools:verified.verifiedPools,onchainPool:verified.onchain,
     poolSelection:{method:"VERIFIED_CAPACITY_ADJUSTED_FEE_VELOCITY",verifiedCandidates:verified.verifiedPools.length,capacityLiquidityTargetUsd:CAPACITY_LIQUIDITY_TARGET_USD,feeBasis:"VOLUME_X_FEE_TIER_PROXY"},
-    market:{priceUsd:price,high24hUsd:max(ohlcv30m),low24hUsd:min(ohlcv30m),high7dUsd:max(ohlcv1h),low7dUsd:min(ohlcv1h),volume5mUsd:sum(ohlcv5m.slice(-1)),volume30mUsd:sum(ohlcv30m.slice(-1)),volume1hUsd:sum(ohlcv1h.slice(-1)),volume24hUsd:selected?.volume24hUsd??null,tvlUsd:selected?.liquidityUsd??null,activeLiquidityUsd:null,feeTier:verified.onchain?.feeTier??selected?.feeTier??null,poolAgeDays:selected?.poolAgeDays??null,tick:{current:verified.onchain?.currentTick??null,lower:null,upper:null},holderFlow:null},
+    market:{priceUsd:price,high24hUsd:max(recent24h),low24hUsd:min(recent24h),high7dUsd:max(ohlcv1h),low7dUsd:min(ohlcv1h),volume5mUsd:sum(ohlcv5m.slice(-1)),volume30mUsd:sum(ohlcv30m.slice(-1)),volume1hUsd:sum(ohlcv1h.slice(-1)),volume24hUsd:selected?.volume24hUsd??null,tvlUsd:selected?.liquidityUsd??null,activeLiquidityUsd:null,feeTier:verified.onchain?.feeTier??selected?.feeTier??null,poolAgeDays:selected?.poolAgeDays??null,tick:{current:verified.onchain?.currentTick??null,lower:null,upper:null},holderFlow:null},
     history:{ohlcv5m,ohlcv30m,ohlcv1h,ohlcv1d},
     onchainEvidence:{tickLiquidity:onchainEvidence?.tickLiquidity??null,feeGrowth:onchainEvidence?.feeGrowth??null,directionalSwaps:null},
     evidence:{grade,freshnessSeconds,conflicts,wickPenalty,sources:collapseStatuses(statuses),surfaceReceipts},
