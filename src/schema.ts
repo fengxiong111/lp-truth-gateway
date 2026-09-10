@@ -4,6 +4,8 @@ export type TruthSource = "dexscreener" | "dexpaprika" | "geckoterminal" | "unis
 export type SourceTransport = "OFFICIAL_API" | "RPC" | "PUBLIC_ENDPOINT" | "DISCOVERED_ENDPOINT" | "HTML_DOM" | "BROWSER_DOM" | "NONE";
 export type SourceStatus = { source:TruthSource; status:"READY"|"BLOCKED"; fetchedAt:string; failureState:Nullable<FailureState>; error:Nullable<string>; transport?:SourceTransport };
 export type SurfaceReceipt = { source:TruthSource; url:string; transport:SourceTransport; transportReady:boolean; status:"READY"|"BLOCKED"; addressMatched:boolean; structuredPayload:boolean; discoveredEndpoints:number; discoveredEndpointPaths:string[]; contentSha256:Nullable<string>; error:Nullable<string> };
+export type SourceReceipt = { source:TruthSource; transport:Nullable<SourceTransport>; url:Nullable<string>; fetchedAt:string; status:"READY"|"BLOCKED"; failureState:Nullable<FailureState>; error:Nullable<string>; contentSha256:Nullable<string> };
+export type TruthReceipt = { sourceUrl:Nullable<string>; transport:Nullable<SourceTransport>; asOf:Nullable<string>; contentSha256:Nullable<string>; blockNumber:Nullable<string>; rpcUrl:Nullable<string>; conflicts:string[]; failureState:Nullable<FailureState> };
 export type PoolCandidate = { chainId:Nullable<string>; dexId:Nullable<string>; poolAddress:string; baseAddress:Nullable<string>; quoteAddress:Nullable<string>; baseSymbol:Nullable<string>; quoteSymbol:Nullable<string>; queriedTokenSide:Nullable<"base"|"quote">; priceUsd:Nullable<number>; volume24hUsd:Nullable<number>; liquidityUsd:Nullable<number>; feeTier:Nullable<number>; grossFee24hUsd:Nullable<number>; feeVelocity24h:Nullable<number>; capacityAdjustedFeeVelocity24h:Nullable<number>; poolAgeDays:Nullable<number>; source:string };
 export type Ohlcv = { timestamp:number; open:number; high:number; low:number; close:number; volumeUsd:number };
 export type OnchainPoolTruth = { chainId:string; poolAddress:string; factory:string; token0:string; token1:string; feeTier:number; tickSpacing:number; currentTick:number; sqrtPriceX96:string; activeLiquidityRaw:string; canonical:boolean };
@@ -22,5 +24,6 @@ export type TruthArtifact = {
   history:{ohlcv5m:Ohlcv[]; ohlcv30m:Ohlcv[]; ohlcv1h:Ohlcv[]; ohlcv1d:Ohlcv[]};
   onchainEvidence:{tickLiquidity:Nullable<TickLiquidityEvidence>; feeGrowth:Nullable<FeeGrowthEvidence>; directionalSwaps:null};
   evidence:{grade:"A"|"B"|"C"|"D"; freshnessSeconds:Nullable<number>; conflicts:string[]; wickPenalty:boolean; sources:SourceStatus[]; surfaceReceipts:SurfaceReceipt[]};
+  receipts:{source:SourceReceipt[]; truth:TruthReceipt[]};
   failureState:Nullable<FailureState>;
 };

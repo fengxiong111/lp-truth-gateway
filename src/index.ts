@@ -2,6 +2,7 @@ import { fetchOnchainEvidence } from "./onchain-evidence.js";
 import { fetchUniswapV3State } from "./onchain.js";
 import { fetchDex, fetchOhlcv, fetchPaprikaOhlcv } from "./sources.js";
 import { probePublicEnhancements } from "./surface.js";
+import { createHash } from "node:crypto";
 import type { Ohlcv, OnchainPoolTruth, PoolCandidate, SourceStatus, TruthArtifact } from "./schema.js";
 
 const CAPACITY_LIQUIDITY_TARGET_USD = 100_000;
@@ -11,6 +12,7 @@ const min = (rows: Ohlcv[]) => rows.length ? Math.min(...rows.map((x) => x.low))
 const sum = (rows: Ohlcv[]) => rows.length ? rows.reduce((total, x) => total + x.volumeUsd, 0) : null;
 const lower = (x: string | null) => x?.toLowerCase() ?? null;
 const isV3Address = (x: string) => /^0x[0-9a-fA-F]{40}$/.test(x);
+const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
 function comparablePriceConflicts(candidates: PoolCandidate[], selected: PoolCandidate | null): string[] {
   if (!selected?.priceUsd || selected.priceUsd <= 0) return [];
@@ -78,13 +80,15 @@ export async function buildTruth(address: string): Promise<TruthArtifact> {
     [ohlcv5m,ohlcv30m,ohlcv1h,ohlcv1d]=paprika.map((x)=>x.rows);
     const paprikaStatus=paprika.find((x)=>x.rows.length)?.status??paprika.find((x)=>x.status.status==="BLOCKED")?.status;
     if(paprikaStatus)statuses.push({...paprikaStatus,transport:"PUBLIC_ENDPOINT"});
-    historyReady=ohlcv1h.length>0&&paprikaStatus?.status==="READY";
+    historyReady=ohlcv1h.length>=120&&paprikaStatus?.status==="READY"&&
+      (ohlcv1h.at(-1)!.timestamp-ohlcv1h[0]!.timestamp)>=6*86400;
     if(!historyReady){
       const gecko=await Promise.all([fetchOhlcv(selected,5,12),fetchOhlcv(selected,30,48),fetchOhlcv(selected,60,168),fetchOhlcv(selected,1440,10)]);
       const geckoStatus=gecko.find((x)=>x.rows.length)?.status??gecko.find((x)=>x.status.status==="BLOCKED")?.status;
       if(geckoStatus)statuses.push({...geckoStatus,transport:"PUBLIC_ENDPOINT"});
       if(gecko[0].rows.length)ohlcv5m=gecko[0].rows;if(gecko[1].rows.length)ohlcv30m=gecko[1].rows;if(gecko[2].rows.length)ohlcv1h=gecko[2].rows;if(gecko[3].rows.length)ohlcv1d=gecko[3].rows;
-      historyReady=ohlcv1h.length>0&&geckoStatus?.status==="READY";
+      historyReady=ohlcv1h.length>=120&&geckoStatus?.status==="READY"&&
+        (ohlcv1h.at(-1)!.timestamp-ohlcv1h[0]!.timestamp)>=6*86400;
     }
   }
 
@@ -102,6 +106,14 @@ export async function buildTruth(address: string): Promise<TruthArtifact> {
   const baseB=marketReady&&historyReady&&onchainReady&&conflicts.length===0;
   const feeGrowthA=Boolean(onchainEvidence?.feeGrowth.verified&&(onchainEvidence.feeGrowth.observedWindowSeconds??0)>=5&&onchainEvidence.feeGrowth.feeGrowthGlobal0X128DeltaRaw!==null&&onchainEvidence.feeGrowth.feeGrowthGlobal1X128DeltaRaw!==null);
   const gradeA=Boolean(baseB&&onchainEvidence?.tickLiquidity.verified&&feeGrowthA);
+  const sourceReceipts=statuses.map((s)=>({
+    source:s.source,transport:s.transport??null,url:null,fetchedAt:s.fetchedAt,status:s.status,
+    failureState:s.failureState,error:s.error,contentSha256:null,
+  }));
+  const truthReceipts=[
+    {sourceUrl:null,transport:"PUBLIC_ENDPOINT" as const,asOf:latestHistoryTs===null?null:new Date(latestHistoryTs*1000).toISOString(),contentSha256:hash({ohlcv5m,ohlcv30m,ohlcv1h,ohlcv1d}),blockNumber:null,rpcUrl:null,conflicts, failureState:historyReady?null:"BLOCKED_EVIDENCE" as const},
+    {sourceUrl:verified.onchain?.poolAddress??null,transport:"RPC" as const,asOf:now(),contentSha256:hash(verified.onchain),blockNumber:onchainEvidence?.feeGrowth?.toBlock??onchainEvidence?.tickLiquidity?.blockNumber??null,rpcUrl:onchainEvidence?.feeGrowth?.rpcUrl??onchainEvidence?.tickLiquidity?.rpcUrl??null,conflicts, failureState:gradeA?null:"BLOCKED_EVIDENCE" as const},
+  ];
   const grade:"A"|"B"|"C"|"D"=gradeA?"A":baseB?"B":marketReady&&historyReady?"C":marketReady?"C":"D";
 
   return {
@@ -111,6 +123,7 @@ export async function buildTruth(address: string): Promise<TruthArtifact> {
     history:{ohlcv5m,ohlcv30m,ohlcv1h,ohlcv1d},
     onchainEvidence:{tickLiquidity:onchainEvidence?.tickLiquidity??null,feeGrowth:onchainEvidence?.feeGrowth??null,directionalSwaps:null},
     evidence:{grade,freshnessSeconds,conflicts,wickPenalty,sources:collapseStatuses(statuses),surfaceReceipts},
+    receipts:{source:sourceReceipts,truth:truthReceipts},
     failureState:grade==="D"?"BLOCKED_EVIDENCE":null,
   };
 }
