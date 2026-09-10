@@ -1,6 +1,6 @@
 export type Nullable<T> = T | null;
 export type FailureState = "BLOCKED_DATA" | "BLOCKED_EVIDENCE" | "BLOCKED_AUTH" | "BLOCKED_EXECUTION";
-export type TruthSource = "dexscreener" | "geckoterminal" | "uniswap" | "rpc" | "okx" | "revert" | "vfat";
+export type TruthSource = "dexscreener" | "dexpaprika" | "geckoterminal" | "uniswap" | "rpc" | "okx" | "revert" | "vfat";
 export type SourceStatus = { source: TruthSource; status:"READY"|"BLOCKED"; fetchedAt:string; failureState:Nullable<FailureState>; error:Nullable<string>; };
 export type PoolCandidate = { chainId:Nullable<string>; dexId:Nullable<string>; poolAddress:string; baseSymbol:Nullable<string>; quoteSymbol:Nullable<string>; priceUsd:Nullable<number>; volume24hUsd:Nullable<number>; liquidityUsd:Nullable<number>; feeTier:Nullable<number>; poolAgeDays:Nullable<number>; source:string; };
 export type Ohlcv = { timestamp:number; open:number; high:number; low:number; close:number; volumeUsd:number };
