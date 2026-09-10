@@ -14,6 +14,7 @@ export type SurfaceReceipt = {
   source:TruthSource;
   url:string;
   transport:SourceTransport;
+  transportReady:boolean;
   status:"READY"|"BLOCKED";
   addressMatched:boolean;
   structuredPayload:boolean;
