@@ -7,39 +7,8 @@ export type SurfaceReceipt = { source:TruthSource; url:string; transport:SourceT
 export type PoolCandidate = { chainId:Nullable<string>; dexId:Nullable<string>; poolAddress:string; baseAddress:Nullable<string>; quoteAddress:Nullable<string>; baseSymbol:Nullable<string>; quoteSymbol:Nullable<string>; queriedTokenSide:Nullable<"base"|"quote">; priceUsd:Nullable<number>; volume24hUsd:Nullable<number>; liquidityUsd:Nullable<number>; feeTier:Nullable<number>; grossFee24hUsd:Nullable<number>; feeVelocity24h:Nullable<number>; capacityAdjustedFeeVelocity24h:Nullable<number>; poolAgeDays:Nullable<number>; source:string };
 export type Ohlcv = { timestamp:number; open:number; high:number; low:number; close:number; volumeUsd:number };
 export type OnchainPoolTruth = { chainId:string; poolAddress:string; factory:string; token0:string; token1:string; feeTier:number; tickSpacing:number; currentTick:number; sqrtPriceX96:string; activeLiquidityRaw:string; canonical:boolean };
-export type TickLiquidityEvidence = {
-  verified:boolean;
-  source:"UNISWAP_V3_TICKLENS";
-  tickLens:string;
-  blockNumber:Nullable<string>;
-  currentTick:number;
-  tickSpacing:number;
-  wordRadius:number;
-  wordsQueried:number;
-  initializedTickCount:number;
-  nearestBelowTick:Nullable<number>;
-  nearestAboveTick:Nullable<number>;
-  nearestBelowDistance:Nullable<number>;
-  nearestAboveDistance:Nullable<number>;
-  totalLiquidityGrossRaw:string;
-  top5GrossLiquidityConcentrationPct:Nullable<number>;
-  error:Nullable<string>;
-};
-export type FeeGrowthEvidence = {
-  verified:boolean;
-  source:"UNISWAP_V3_POOL";
-  requestedWindowSeconds:number;
-  observedWindowSeconds:Nullable<number>;
-  fromBlock:Nullable<string>;
-  toBlock:Nullable<string>;
-  fromTimestamp:Nullable<number>;
-  toTimestamp:Nullable<number>;
-  feeGrowthGlobal0X128DeltaRaw:Nullable<string>;
-  feeGrowthGlobal1X128DeltaRaw:Nullable<string>;
-  nonZeroGrowth:boolean;
-  archiveReadVerified:boolean;
-  error:Nullable<string>;
-};
+export type TickLiquidityEvidence = { verified:boolean; source:"UNISWAP_V3_TICKLENS"; rpcUrl:Nullable<string>; tickLens:string; blockNumber:Nullable<string>; currentTick:number; tickSpacing:number; wordRadius:number; wordsQueried:number; initializedTickCount:number; nearestBelowTick:Nullable<number>; nearestAboveTick:Nullable<number>; nearestBelowDistance:Nullable<number>; nearestAboveDistance:Nullable<number>; totalLiquidityGrossRaw:string; top5GrossLiquidityConcentrationPct:Nullable<number>; error:Nullable<string> };
+export type FeeGrowthEvidence = { verified:boolean; source:"UNISWAP_V3_POOL"; rpcUrl:Nullable<string>; requestedWindowSeconds:number; observedWindowSeconds:Nullable<number>; fromBlock:Nullable<string>; toBlock:Nullable<string>; fromTimestamp:Nullable<number>; toTimestamp:Nullable<number>; feeGrowthGlobal0X128DeltaRaw:Nullable<string>; feeGrowthGlobal1X128DeltaRaw:Nullable<string>; nonZeroGrowth:boolean; archiveReadVerified:boolean; error:Nullable<string> };
 export type TruthArtifact = {
   schemaVersion:"lp-truth-v1";
   request:{tokenAddress:string};
