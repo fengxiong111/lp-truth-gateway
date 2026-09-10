@@ -23,18 +23,19 @@ const encAddress=(address:string)=>address.toLowerCase().replace(/^0x/,"").padSt
 const encSigned=(value:number)=>BigInt.asUintN(256,BigInt(value)).toString(16).padStart(64,"0");
 const hexBlock=(n:bigint)=>`0x${n.toString(16)}`;
 const sleep=(ms:number)=>new Promise((resolve)=>setTimeout(resolve,ms));
+const err=(e:unknown)=>e instanceof Error?e.message:"FAILED";
 
 async function rpc<T>(url:string,method:string,params:unknown[]):Promise<T>{
   let last="RPC_FAILED";
   for(let attempt=0;attempt<2;attempt++){
     try{
-      const response=await fetch(url,{method:"POST",headers:{"content-type":"application/json","accept":"application/json","user-agent":"lp-truth-gateway/1.3"},body:JSON.stringify({jsonrpc:"2.0",id:1,method,params}),signal:AbortSignal.timeout(10_000)});
-      if(!response.ok){last=`RPC_HTTP_${response.status}`;if(response.status===403||response.status===429||response.status>=500){await sleep(250*(attempt+1));continue;}throw new Error(last);}
+      const response=await fetch(url,{method:"POST",headers:{"content-type":"application/json","accept":"application/json","user-agent":"lp-truth-gateway/1.4"},body:JSON.stringify({jsonrpc:"2.0",id:1,method,params}),signal:AbortSignal.timeout(8_000)});
+      if(!response.ok){last=`RPC_HTTP_${response.status}`;if(response.status===403||response.status===429||response.status>=500){await sleep(150*(attempt+1));continue;}throw new Error(last);}
       const body=await response.json() as {result?:T;error?:{code?:number;message?:string}};
       if(body.error)throw new Error(`RPC_${body.error.code??"ERROR"}:${body.error.message??"UNKNOWN"}`);
       if(body.result===undefined||body.result===null)throw new Error("RPC_NO_RESULT");
       return body.result;
-    }catch(error){last=error instanceof Error?error.message:"RPC_FAILED";if(attempt===0)await sleep(250);}
+    }catch(error){last=err(error);if(attempt===0)await sleep(150);}
   }
   throw new Error(last);
 }
@@ -58,15 +59,19 @@ function pct(numerator:bigint,denominator:bigint):number|null{if(denominator<=0n
 async function tickVia(url:string,pool:OnchainPoolTruth,blockTag:string|undefined,wordRadius:number):Promise<TickLiquidityEvidence>{
   await assertChain(url);
   const tag=blockTag??await rpc<string>(url,"eth_blockNumber",[]),center=tickWordPosition(pool.currentTick,pool.tickSpacing),words=Array.from({length:wordRadius*2+1},(_,i)=>center-wordRadius+i);
-  const decoded:PopulatedTick[]=[];
-  for(const bitmapWord of words)decoded.push(...decodePopulatedTicks(await call(url,TICK_LENS,tickLensData(pool.poolAddress,bitmapWord),tag)));
+  const encoded=await Promise.all(words.map((bitmapWord)=>call(url,TICK_LENS,tickLensData(pool.poolAddress,bitmapWord),tag)));
+  const decoded=encoded.flatMap(decodePopulatedTicks);
   const unique=[...new Map(decoded.map(x=>[x.tick,x])).values()].sort((a,b)=>a.tick-b.tick),below=unique.filter(x=>x.tick<=pool.currentTick).at(-1)?.tick??null,above=unique.find(x=>x.tick>pool.currentTick)?.tick??null;
   const gross=unique.map(x=>BigInt(x.liquidityGrossRaw)),total=gross.reduce((a,b)=>a+b,0n),top5=[...gross].sort((a,b)=>a===b?0:a>b?-1:1).slice(0,5).reduce((a,b)=>a+b,0n);
   return {verified:unique.length>0,source:"UNISWAP_V3_TICKLENS",rpcUrl:url,tickLens:TICK_LENS,blockNumber:tag,currentTick:pool.currentTick,tickSpacing:pool.tickSpacing,wordRadius,wordsQueried:words.length,initializedTickCount:unique.length,nearestBelowTick:below,nearestAboveTick:above,nearestBelowDistance:below===null?null:pool.currentTick-below,nearestAboveDistance:above===null?null:above-pool.currentTick,totalLiquidityGrossRaw:total.toString(),top5GrossLiquidityConcentrationPct:pct(top5,total),error:unique.length?null:"NO_INITIALIZED_TICKS_IN_WINDOW"};
 }
 export async function fetchTickLiquidityEvidence(pool:OnchainPoolTruth,blockTag?:string,wordRadius=2):Promise<TickLiquidityEvidence>{
-  const errors:string[]=[];for(const url of RPC_URLS){try{return await tickVia(url,pool,blockTag,wordRadius);}catch(error){errors.push(`${new URL(url).hostname}:${error instanceof Error?error.message:"FAILED"}`);}}
-  return {verified:false,source:"UNISWAP_V3_TICKLENS",rpcUrl:null,tickLens:TICK_LENS,blockNumber:blockTag??null,currentTick:pool.currentTick,tickSpacing:pool.tickSpacing,wordRadius,wordsQueried:0,initializedTickCount:0,nearestBelowTick:null,nearestAboveTick:null,nearestBelowDistance:null,nearestAboveDistance:null,totalLiquidityGrossRaw:"0",top5GrossLiquidityConcentrationPct:null,error:`ALL_RPC_FAILED:${errors.join("|")}`};
+  try{
+    return await Promise.any(RPC_URLS.map(async(url)=>{try{return await tickVia(url,pool,blockTag,wordRadius);}catch(error){throw new Error(`${new URL(url).hostname}:${err(error)}`);}}));
+  }catch(error){
+    const details=error instanceof AggregateError?error.errors.map(err).join("|"):err(error);
+    return {verified:false,source:"UNISWAP_V3_TICKLENS",rpcUrl:null,tickLens:TICK_LENS,blockNumber:blockTag??null,currentTick:pool.currentTick,tickSpacing:pool.tickSpacing,wordRadius,wordsQueried:0,initializedTickCount:0,nearestBelowTick:null,nearestAboveTick:null,nearestBelowDistance:null,nearestAboveDistance:null,totalLiquidityGrossRaw:"0",top5GrossLiquidityConcentrationPct:null,error:`ALL_RPC_FAILED:${details}`};
+  }
 }
 
 async function historicalBlock(url:string,latest:RpcBlock,desiredSeconds:number):Promise<RpcBlock>{
@@ -77,8 +82,8 @@ async function historicalBlock(url:string,latest:RpcBlock,desiredSeconds:number)
 }
 function delta256(current:bigint,previous:bigint):bigint{return(current-previous+UINT256_MOD)%UINT256_MOD;}
 async function feeSnapshot(url:string,pool:OnchainPoolTruth):Promise<FeeSnapshot>{
-  const tag=await rpc<string>(url,"eth_blockNumber",[]),meta=await block(url,tag),fee0=u(await call(url,pool.poolAddress,FEE_GROWTH_0,tag)),fee1=u(await call(url,pool.poolAddress,FEE_GROWTH_1,tag));
-  return {block:tag,timestamp:Number(BigInt(meta.timestamp)),fee0,fee1};
+  const tag=await rpc<string>(url,"eth_blockNumber",[]),meta=await block(url,tag),[fee0Hex,fee1Hex]=await Promise.all([call(url,pool.poolAddress,FEE_GROWTH_0,tag),call(url,pool.poolAddress,FEE_GROWTH_1,tag)]);
+  return {block:tag,timestamp:Number(BigInt(meta.timestamp)),fee0:u(fee0Hex),fee1:u(fee1Hex)};
 }
 function fromSnapshots(url:string,requestedWindowSeconds:number,from:FeeSnapshot,to:FeeSnapshot,mode:"ARCHIVE_WINDOW"|"LIVE_DELTA",archiveReadVerified:boolean):FeeGrowthEvidence{
   const d0=delta256(to.fee0,from.fee0),d1=delta256(to.fee1,from.fee1);
@@ -86,19 +91,26 @@ function fromSnapshots(url:string,requestedWindowSeconds:number,from:FeeSnapshot
 }
 async function feeGrowthArchive(url:string,pool:OnchainPoolTruth,requestedWindowSeconds:number):Promise<FeeGrowthEvidence>{
   await assertChain(url);const latestTag=await rpc<string>(url,"eth_blockNumber",[]),latest=await block(url,latestTag),previous=await historicalBlock(url,latest,requestedWindowSeconds);
-  const from:FeeSnapshot={block:previous.number,timestamp:Number(BigInt(previous.timestamp)),fee0:u(await call(url,pool.poolAddress,FEE_GROWTH_0,previous.number)),fee1:u(await call(url,pool.poolAddress,FEE_GROWTH_1,previous.number))};
-  const to:FeeSnapshot={block:latest.number,timestamp:Number(BigInt(latest.timestamp)),fee0:u(await call(url,pool.poolAddress,FEE_GROWTH_0,latest.number)),fee1:u(await call(url,pool.poolAddress,FEE_GROWTH_1,latest.number))};
+  const [from0,from1,to0,to1]=await Promise.all([
+    call(url,pool.poolAddress,FEE_GROWTH_0,previous.number),call(url,pool.poolAddress,FEE_GROWTH_1,previous.number),call(url,pool.poolAddress,FEE_GROWTH_0,latest.number),call(url,pool.poolAddress,FEE_GROWTH_1,latest.number)
+  ]);
+  const from:FeeSnapshot={block:previous.number,timestamp:Number(BigInt(previous.timestamp)),fee0:u(from0),fee1:u(from1)};
+  const to:FeeSnapshot={block:latest.number,timestamp:Number(BigInt(latest.timestamp)),fee0:u(to0),fee1:u(to1)};
   return fromSnapshots(url,requestedWindowSeconds,from,to,"ARCHIVE_WINDOW",true);
 }
 async function feeGrowthLive(url:string,pool:OnchainPoolTruth,requestedWindowSeconds:number):Promise<FeeGrowthEvidence>{
-  await assertChain(url);const from=await feeSnapshot(url,pool);await sleep(6000);const to=await feeSnapshot(url,pool);return fromSnapshots(url,requestedWindowSeconds,from,to,"LIVE_DELTA",false);
+  await assertChain(url);const from=await feeSnapshot(url,pool);await sleep(5200);const to=await feeSnapshot(url,pool);return fromSnapshots(url,requestedWindowSeconds,from,to,"LIVE_DELTA",false);
 }
-export async function fetchFeeGrowthEvidence(pool:OnchainPoolTruth,requestedWindowSeconds=3600):Promise<FeeGrowthEvidence>{
+async function raceEvidence(kind:"ARCHIVE"|"LIVE",pool:OnchainPoolTruth,requestedWindowSeconds:number):Promise<FeeGrowthEvidence>{
+  return Promise.any(RPC_URLS.map(async(url)=>{try{return kind==="ARCHIVE"?await feeGrowthArchive(url,pool,requestedWindowSeconds):await feeGrowthLive(url,pool,requestedWindowSeconds);}catch(error){throw new Error(`${kind}:${new URL(url).hostname}:${err(error)}`);}}));
+}
+export async function fetchFeeGrowthEvidence(pool:OnchainPoolTruth,requestedWindowSeconds=3600,allowLive=true):Promise<FeeGrowthEvidence>{
   const errors:string[]=[];
-  for(const url of RPC_URLS){try{return await feeGrowthArchive(url,pool,requestedWindowSeconds);}catch(error){errors.push(`ARCHIVE:${new URL(url).hostname}:${error instanceof Error?error.message:"FAILED"}`);}}
-  for(const url of RPC_URLS){try{const live=await feeGrowthLive(url,pool,requestedWindowSeconds);if(live.verified)return live;}catch(error){errors.push(`LIVE:${new URL(url).hostname}:${error instanceof Error?error.message:"FAILED"}`);}}
+  try{return await raceEvidence("ARCHIVE",pool,requestedWindowSeconds);}catch(error){errors.push(error instanceof AggregateError?error.errors.map(err).join("|"):err(error));}
+  if(allowLive){try{return await raceEvidence("LIVE",pool,requestedWindowSeconds);}catch(error){errors.push(error instanceof AggregateError?error.errors.map(err).join("|"):err(error));}}
   return {verified:false,source:"UNISWAP_V3_POOL",mode:null,rpcUrl:null,requestedWindowSeconds,observedWindowSeconds:null,fromBlock:null,toBlock:null,fromTimestamp:null,toTimestamp:null,feeGrowthGlobal0X128DeltaRaw:null,feeGrowthGlobal1X128DeltaRaw:null,nonZeroGrowth:false,archiveReadVerified:false,error:`ALL_RPC_FAILED:${errors.join("|")}`};
 }
-export async function fetchOnchainEvidence(pool:OnchainPoolTruth):Promise<{tickLiquidity:TickLiquidityEvidence;feeGrowth:FeeGrowthEvidence}>{
-  const tickLiquidity=await fetchTickLiquidityEvidence(pool);const feeGrowth=await fetchFeeGrowthEvidence(pool);return{tickLiquidity,feeGrowth};
+export async function fetchOnchainEvidence(pool:OnchainPoolTruth,options?:{allowLiveFeeGrowth?:boolean}):Promise<{tickLiquidity:TickLiquidityEvidence;feeGrowth:FeeGrowthEvidence}>{
+  const [tickLiquidity,feeGrowth]=await Promise.all([fetchTickLiquidityEvidence(pool),fetchFeeGrowthEvidence(pool,3600,options?.allowLiveFeeGrowth??true)]);
+  return{tickLiquidity,feeGrowth};
 }
