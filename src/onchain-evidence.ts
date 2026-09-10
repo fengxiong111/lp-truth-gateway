@@ -14,6 +14,7 @@ const UINT256_MOD = 1n << 256n;
 
 type RpcBlock = { number:string; timestamp:string };
 type PopulatedTick = { tick:number; liquidityNetRaw:string; liquidityGrossRaw:string };
+type FeeSnapshot = { block:string; timestamp:number; fee0:bigint; fee1:bigint };
 const clean=(x:string)=>x.startsWith("0x")?x.slice(2):x;
 const word=(hex:string,i:number)=>clean(hex).slice(i*64,(i+1)*64).padStart(64,"0");
 const u=(hex:string,i=0)=>BigInt(`0x${word(hex,i)}`);
@@ -27,7 +28,7 @@ async function rpc<T>(url:string,method:string,params:unknown[]):Promise<T>{
   let last="RPC_FAILED";
   for(let attempt=0;attempt<2;attempt++){
     try{
-      const response=await fetch(url,{method:"POST",headers:{"content-type":"application/json","accept":"application/json","user-agent":"lp-truth-gateway/1.2"},body:JSON.stringify({jsonrpc:"2.0",id:1,method,params}),signal:AbortSignal.timeout(10_000)});
+      const response=await fetch(url,{method:"POST",headers:{"content-type":"application/json","accept":"application/json","user-agent":"lp-truth-gateway/1.3"},body:JSON.stringify({jsonrpc:"2.0",id:1,method,params}),signal:AbortSignal.timeout(10_000)});
       if(!response.ok){last=`RPC_HTTP_${response.status}`;if(response.status===403||response.status===429||response.status>=500){await sleep(250*(attempt+1));continue;}throw new Error(last);}
       const body=await response.json() as {result?:T;error?:{code?:number;message?:string}};
       if(body.error)throw new Error(`RPC_${body.error.code??"ERROR"}:${body.error.message??"UNKNOWN"}`);
@@ -75,15 +76,28 @@ async function historicalBlock(url:string,latest:RpcBlock,desiredSeconds:number)
   for(let i=0;i<2;i++){const observed=latestTs-Number(BigInt(candidate.timestamp)),error=desiredSeconds-observed;if(Math.abs(error)<=90)break;guess-=BigInt(Math.round(error/secondsPerBlock));if(guess<0n)guess=0n;if(guess>=latestN)guess=latestN-1n;candidate=await block(url,hexBlock(guess));}return candidate;
 }
 function delta256(current:bigint,previous:bigint):bigint{return(current-previous+UINT256_MOD)%UINT256_MOD;}
-async function feeGrowthVia(url:string,pool:OnchainPoolTruth,requestedWindowSeconds:number):Promise<FeeGrowthEvidence>{
-  await assertChain(url);const latestTag=await rpc<string>(url,"eth_blockNumber",[]),latest=await block(url,latestTag),previous=await historicalBlock(url,latest,requestedWindowSeconds),fromTag=previous.number;
-  const old0=await call(url,pool.poolAddress,FEE_GROWTH_0,fromTag),old1=await call(url,pool.poolAddress,FEE_GROWTH_1,fromTag),new0=await call(url,pool.poolAddress,FEE_GROWTH_0,latest.number),new1=await call(url,pool.poolAddress,FEE_GROWTH_1,latest.number);
-  const d0=delta256(u(new0),u(old0)),d1=delta256(u(new1),u(old1)),fromTs=Number(BigInt(previous.timestamp)),toTs=Number(BigInt(latest.timestamp));
-  return {verified:true,source:"UNISWAP_V3_POOL",rpcUrl:url,requestedWindowSeconds,observedWindowSeconds:Math.max(0,toTs-fromTs),fromBlock:previous.number,toBlock:latest.number,fromTimestamp:fromTs,toTimestamp:toTs,feeGrowthGlobal0X128DeltaRaw:d0.toString(),feeGrowthGlobal1X128DeltaRaw:d1.toString(),nonZeroGrowth:d0>0n||d1>0n,archiveReadVerified:true,error:null};
+async function feeSnapshot(url:string,pool:OnchainPoolTruth):Promise<FeeSnapshot>{
+  const tag=await rpc<string>(url,"eth_blockNumber",[]),meta=await block(url,tag),fee0=u(await call(url,pool.poolAddress,FEE_GROWTH_0,tag)),fee1=u(await call(url,pool.poolAddress,FEE_GROWTH_1,tag));
+  return {block:tag,timestamp:Number(BigInt(meta.timestamp)),fee0,fee1};
+}
+function fromSnapshots(url:string,requestedWindowSeconds:number,from:FeeSnapshot,to:FeeSnapshot,mode:"ARCHIVE_WINDOW"|"LIVE_DELTA",archiveReadVerified:boolean):FeeGrowthEvidence{
+  const d0=delta256(to.fee0,from.fee0),d1=delta256(to.fee1,from.fee1);
+  return {verified:BigInt(to.block)>BigInt(from.block),source:"UNISWAP_V3_POOL",mode,rpcUrl:url,requestedWindowSeconds,observedWindowSeconds:Math.max(0,to.timestamp-from.timestamp),fromBlock:from.block,toBlock:to.block,fromTimestamp:from.timestamp,toTimestamp:to.timestamp,feeGrowthGlobal0X128DeltaRaw:d0.toString(),feeGrowthGlobal1X128DeltaRaw:d1.toString(),nonZeroGrowth:d0>0n||d1>0n,archiveReadVerified,error:null};
+}
+async function feeGrowthArchive(url:string,pool:OnchainPoolTruth,requestedWindowSeconds:number):Promise<FeeGrowthEvidence>{
+  await assertChain(url);const latestTag=await rpc<string>(url,"eth_blockNumber",[]),latest=await block(url,latestTag),previous=await historicalBlock(url,latest,requestedWindowSeconds);
+  const from:FeeSnapshot={block:previous.number,timestamp:Number(BigInt(previous.timestamp)),fee0:u(await call(url,pool.poolAddress,FEE_GROWTH_0,previous.number)),fee1:u(await call(url,pool.poolAddress,FEE_GROWTH_1,previous.number))};
+  const to:FeeSnapshot={block:latest.number,timestamp:Number(BigInt(latest.timestamp)),fee0:u(await call(url,pool.poolAddress,FEE_GROWTH_0,latest.number)),fee1:u(await call(url,pool.poolAddress,FEE_GROWTH_1,latest.number))};
+  return fromSnapshots(url,requestedWindowSeconds,from,to,"ARCHIVE_WINDOW",true);
+}
+async function feeGrowthLive(url:string,pool:OnchainPoolTruth,requestedWindowSeconds:number):Promise<FeeGrowthEvidence>{
+  await assertChain(url);const from=await feeSnapshot(url,pool);await sleep(6000);const to=await feeSnapshot(url,pool);return fromSnapshots(url,requestedWindowSeconds,from,to,"LIVE_DELTA",false);
 }
 export async function fetchFeeGrowthEvidence(pool:OnchainPoolTruth,requestedWindowSeconds=3600):Promise<FeeGrowthEvidence>{
-  const errors:string[]=[];for(const url of RPC_URLS){try{return await feeGrowthVia(url,pool,requestedWindowSeconds);}catch(error){errors.push(`${new URL(url).hostname}:${error instanceof Error?error.message:"FAILED"}`);}}
-  return {verified:false,source:"UNISWAP_V3_POOL",rpcUrl:null,requestedWindowSeconds,observedWindowSeconds:null,fromBlock:null,toBlock:null,fromTimestamp:null,toTimestamp:null,feeGrowthGlobal0X128DeltaRaw:null,feeGrowthGlobal1X128DeltaRaw:null,nonZeroGrowth:false,archiveReadVerified:false,error:`ALL_RPC_FAILED:${errors.join("|")}`};
+  const errors:string[]=[];
+  for(const url of RPC_URLS){try{return await feeGrowthArchive(url,pool,requestedWindowSeconds);}catch(error){errors.push(`ARCHIVE:${new URL(url).hostname}:${error instanceof Error?error.message:"FAILED"}`);}}
+  for(const url of RPC_URLS){try{const live=await feeGrowthLive(url,pool,requestedWindowSeconds);if(live.verified)return live;}catch(error){errors.push(`LIVE:${new URL(url).hostname}:${error instanceof Error?error.message:"FAILED"}`);}}
+  return {verified:false,source:"UNISWAP_V3_POOL",mode:null,rpcUrl:null,requestedWindowSeconds,observedWindowSeconds:null,fromBlock:null,toBlock:null,fromTimestamp:null,toTimestamp:null,feeGrowthGlobal0X128DeltaRaw:null,feeGrowthGlobal1X128DeltaRaw:null,nonZeroGrowth:false,archiveReadVerified:false,error:`ALL_RPC_FAILED:${errors.join("|")}`};
 }
 export async function fetchOnchainEvidence(pool:OnchainPoolTruth):Promise<{tickLiquidity:TickLiquidityEvidence;feeGrowth:FeeGrowthEvidence}>{
   const tickLiquidity=await fetchTickLiquidityEvidence(pool);const feeGrowth=await fetchFeeGrowthEvidence(pool);return{tickLiquidity,feeGrowth};
