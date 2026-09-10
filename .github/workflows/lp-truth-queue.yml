@@ -5,21 +5,18 @@ jobs:
   truth:
     if: github.actor == github.repository_owner && startsWith(github.event.issue.title, '[LP_TRUTH] ')
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 2
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: {node-version: 22.13.0, cache: npm}
-      - run: npm ci --ignore-scripts --prefer-offline
       - name: Build verified fast truth artifact
         env: {ISSUE_TITLE: "${{ github.event.issue.title }}"}
         run: |
           ADDRESS="${ISSUE_TITLE#\[LP_TRUTH\] }"
           [[ "$ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]] || exit 1
-          npx tsx runner.ts "$ADDRESS" > truth-artifact.json
+          node dist/runner.mjs "$ADDRESS" > truth-artifact.json
       - name: Comment and close
         env: {GH_TOKEN: "${{ github.token }}"}
         run: |
           { echo '[LP_TRUTH_RESULT]'; echo '```json'; cat truth-artifact.json; echo '```'; } > comment.md
           gh issue comment "${{ github.event.issue.number }}" --body-file comment.md
-          gh issue close "${{ github.event.issue.number }}" --comment "LP Truth fast run completed; versioned artifact recorded above."
+          gh issue close "${{ github.event.issue.number }}" --comment "LP Truth zero-install run completed; versioned artifact recorded above."
