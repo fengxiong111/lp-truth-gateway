@@ -1,5 +1,6 @@
 import { fetchUniswapV3State } from "./onchain.js";
 import { fetchDex, fetchOhlcv, fetchPaprikaOhlcv } from "./sources.js";
+import { probePublicEnhancements } from "./surface.js";
 import type { Ohlcv, OnchainPoolTruth, PoolCandidate, SourceStatus, TruthArtifact } from "./schema.js";
 
 const CAPACITY_LIQUIDITY_TARGET_USD = 100_000;
@@ -74,25 +75,11 @@ async function verifyPools(candidates: PoolCandidate[]): Promise<{
   const enriched = candidates.map((candidate) => {
     const proof = proofByPool.get(candidate.poolAddress.toLowerCase());
     if (!proof) return candidate;
-    const grossFee24hUsd = candidate.volume24hUsd === null
-      ? null
-      : candidate.volume24hUsd * (proof.feeTier / 1_000_000);
-    const feeVelocity24h = grossFee24hUsd !== null && candidate.liquidityUsd !== null && candidate.liquidityUsd > 0
-      ? grossFee24hUsd / candidate.liquidityUsd
-      : null;
-    const capacityFactor = candidate.liquidityUsd === null
-      ? null
-      : Math.min(1, candidate.liquidityUsd / CAPACITY_LIQUIDITY_TARGET_USD);
-    const capacityAdjustedFeeVelocity24h = feeVelocity24h === null || capacityFactor === null
-      ? null
-      : feeVelocity24h * capacityFactor;
-    return {
-      ...candidate,
-      feeTier: proof.feeTier,
-      grossFee24hUsd,
-      feeVelocity24h,
-      capacityAdjustedFeeVelocity24h,
-    };
+    const grossFee24hUsd = candidate.volume24hUsd === null ? null : candidate.volume24hUsd * (proof.feeTier / 1_000_000);
+    const feeVelocity24h = grossFee24hUsd !== null && candidate.liquidityUsd !== null && candidate.liquidityUsd > 0 ? grossFee24hUsd / candidate.liquidityUsd : null;
+    const capacityFactor = candidate.liquidityUsd === null ? null : Math.min(1, candidate.liquidityUsd / CAPACITY_LIQUIDITY_TARGET_USD);
+    const capacityAdjustedFeeVelocity24h = feeVelocity24h === null || capacityFactor === null ? null : feeVelocity24h * capacityFactor;
+    return { ...candidate, feeTier: proof.feeTier, grossFee24hUsd, feeVelocity24h, capacityAdjustedFeeVelocity24h };
   });
 
   const verifiedCandidates = enriched.filter((candidate) => proofByPool.has(candidate.poolAddress.toLowerCase()));
@@ -108,8 +95,8 @@ async function verifyPools(candidates: PoolCandidate[]): Promise<{
 
   if (!collapsed.length) {
     collapsed.push(
-      { source: "rpc", status: "BLOCKED", fetchedAt: now(), failureState: "BLOCKED_DATA", error: "NO_SUPPORTED_ONCHAIN_POOL" },
-      { source: "uniswap", status: "BLOCKED", fetchedAt: now(), failureState: "BLOCKED_EVIDENCE", error: "NO_CANONICAL_V3_POOL_PROOF" },
+      { source: "rpc", status: "BLOCKED", fetchedAt: now(), failureState: "BLOCKED_DATA", error: "NO_SUPPORTED_ONCHAIN_POOL", transport: "RPC" },
+      { source: "uniswap", status: "BLOCKED", fetchedAt: now(), failureState: "BLOCKED_EVIDENCE", error: "NO_CANONICAL_V3_POOL_PROOF", transport: "RPC" },
     );
   }
 
@@ -129,6 +116,7 @@ async function verifyPools(candidates: PoolCandidate[]): Promise<{
 }
 
 export async function buildTruth(address: string): Promise<TruthArtifact> {
+  const enhancementPromise = probePublicEnhancements(address);
   const dex = await fetchDex(address);
   const discovered = dex.candidates.sort((a, b) => {
     const liquidity = (b.liquidityUsd ?? -1) - (a.liquidityUsd ?? -1);
@@ -137,12 +125,22 @@ export async function buildTruth(address: string): Promise<TruthArtifact> {
   const verified = await verifyPools(discovered);
   const candidates = verified.candidates;
   const selected = verified.selected;
+  const enhancements = await enhancementPromise;
+  const surfaceReceipts = enhancements.map((x) => x.receipt);
+  const enhancementStatuses: SourceStatus[] = enhancements.map((x) => ({
+    source: x.receipt.source,
+    status: x.receipt.status,
+    fetchedAt: x.fetchedAt,
+    failureState: x.receipt.status === "READY" ? null : "BLOCKED_EVIDENCE",
+    error: x.receipt.error,
+    transport: x.receipt.transport,
+  }));
   const statuses: SourceStatus[] = [
-    dex.status,
+    { ...dex.status, transport: "PUBLIC_ENDPOINT" },
     ...verified.statuses,
-    { source: "okx", status: "BLOCKED", fetchedAt: now(), failureState: "BLOCKED_AUTH", error: "API_KEY_NOT_CONFIGURED" },
-    { source: "revert", status: "BLOCKED", fetchedAt: now(), failureState: "BLOCKED_AUTH", error: "OPTIONAL_ADAPTER_NOT_CONFIGURED" },
-    { source: "vfat", status: "BLOCKED", fetchedAt: now(), failureState: "BLOCKED_AUTH", error: "OPTIONAL_ADAPTER_NOT_CONFIGURED" },
+    { source: "okx", status: "BLOCKED", fetchedAt: now(), failureState: "BLOCKED_AUTH", error: "OFFICIAL_API_KEY_NOT_CONFIGURED", transport: "OFFICIAL_API" },
+    ...enhancementStatuses,
+    { source: "vfat", status: "BLOCKED", fetchedAt: now(), failureState: "BLOCKED_EVIDENCE", error: "NO_TOKEN_SCOPED_PUBLIC_SURFACE_YET", transport: "HTML_DOM" },
   ];
 
   let ohlcv5m: Ohlcv[] = [];
@@ -153,25 +151,19 @@ export async function buildTruth(address: string): Promise<TruthArtifact> {
 
   if (selected) {
     const paprika = await Promise.all([
-      fetchPaprikaOhlcv(selected, "5m", 1),
-      fetchPaprikaOhlcv(selected, "30m", 1),
-      fetchPaprikaOhlcv(selected, "1h", 7),
-      fetchPaprikaOhlcv(selected, "24h", 7),
+      fetchPaprikaOhlcv(selected, "5m", 1), fetchPaprikaOhlcv(selected, "30m", 1), fetchPaprikaOhlcv(selected, "1h", 7), fetchPaprikaOhlcv(selected, "24h", 7),
     ]);
     [ohlcv5m, ohlcv30m, ohlcv1h, ohlcv1d] = paprika.map((x) => x.rows);
     const paprikaStatus = paprika.find((x) => x.rows.length)?.status ?? paprika.find((x) => x.status.status === "BLOCKED")?.status;
-    if (paprikaStatus) statuses.push(paprikaStatus);
+    if (paprikaStatus) statuses.push({ ...paprikaStatus, transport: "PUBLIC_ENDPOINT" });
     historyReady = ohlcv1h.length > 0 && paprikaStatus?.status === "READY";
 
     if (!historyReady) {
       const gecko = await Promise.all([
-        fetchOhlcv(selected, 5, 12),
-        fetchOhlcv(selected, 30, 48),
-        fetchOhlcv(selected, 60, 168),
-        fetchOhlcv(selected, 1440, 10),
+        fetchOhlcv(selected, 5, 12), fetchOhlcv(selected, 30, 48), fetchOhlcv(selected, 60, 168), fetchOhlcv(selected, 1440, 10),
       ]);
       const geckoStatus = gecko.find((x) => x.rows.length)?.status ?? gecko.find((x) => x.status.status === "BLOCKED")?.status;
-      if (geckoStatus) statuses.push(geckoStatus);
+      if (geckoStatus) statuses.push({ ...geckoStatus, transport: "PUBLIC_ENDPOINT" });
       if (gecko[0].rows.length) ohlcv5m = gecko[0].rows;
       if (gecko[1].rows.length) ohlcv30m = gecko[1].rows;
       if (gecko[2].rows.length) ohlcv1h = gecko[2].rows;
@@ -185,20 +177,9 @@ export async function buildTruth(address: string): Promise<TruthArtifact> {
   const latestHistoryTs = ohlcv1h.length ? Math.max(...ohlcv1h.map((x) => x.timestamp)) : null;
   const freshnessSeconds = latestHistoryTs === null ? null : Math.max(0, Math.floor(Date.now() / 1000 - latestHistoryTs));
   const wickPenalty = ohlcv1h.some((x) => x.high > Math.max(x.open, x.close) * 1.25 || x.low < Math.min(x.open, x.close) * 0.75);
-  const onchainReady = Boolean(
-    verified.onchain?.canonical &&
-    verified.onchain.feeTier > 0 &&
-    Number.isFinite(verified.onchain.currentTick) &&
-    BigInt(verified.onchain.activeLiquidityRaw) > 0n,
-  );
+  const onchainReady = Boolean(verified.onchain?.canonical && verified.onchain.feeTier > 0 && Number.isFinite(verified.onchain.currentTick) && BigInt(verified.onchain.activeLiquidityRaw) > 0n);
   const marketReady = dex.status.status === "READY";
-  const grade: "A" | "B" | "C" | "D" = marketReady && historyReady && onchainReady && conflicts.length === 0
-    ? "B"
-    : marketReady && historyReady
-      ? "C"
-      : marketReady
-        ? "C"
-        : "D";
+  const grade: "A" | "B" | "C" | "D" = marketReady && historyReady && onchainReady && conflicts.length === 0 ? "B" : marketReady && historyReady ? "C" : marketReady ? "C" : "D";
 
   return {
     schemaVersion: "lp-truth-v1",
@@ -208,31 +189,16 @@ export async function buildTruth(address: string): Promise<TruthArtifact> {
     poolCandidates: candidates,
     verifiedPools: verified.verifiedPools,
     onchainPool: verified.onchain,
-    poolSelection: {
-      method: "VERIFIED_CAPACITY_ADJUSTED_FEE_VELOCITY",
-      verifiedCandidates: verified.verifiedPools.length,
-      capacityLiquidityTargetUsd: CAPACITY_LIQUIDITY_TARGET_USD,
-      feeBasis: "VOLUME_X_FEE_TIER_PROXY",
-    },
+    poolSelection: { method: "VERIFIED_CAPACITY_ADJUSTED_FEE_VELOCITY", verifiedCandidates: verified.verifiedPools.length, capacityLiquidityTargetUsd: CAPACITY_LIQUIDITY_TARGET_USD, feeBasis: "VOLUME_X_FEE_TIER_PROXY" },
     market: {
       priceUsd: price,
-      high24hUsd: max(ohlcv30m),
-      low24hUsd: min(ohlcv30m),
-      high7dUsd: max(ohlcv1h),
-      low7dUsd: min(ohlcv1h),
-      volume5mUsd: sum(ohlcv5m.slice(-1)),
-      volume30mUsd: sum(ohlcv30m.slice(-1)),
-      volume1hUsd: sum(ohlcv1h.slice(-1)),
-      volume24hUsd: selected?.volume24hUsd ?? null,
-      tvlUsd: selected?.liquidityUsd ?? null,
-      activeLiquidityUsd: null,
-      feeTier: verified.onchain?.feeTier ?? selected?.feeTier ?? null,
-      poolAgeDays: selected?.poolAgeDays ?? null,
-      tick: { current: verified.onchain?.currentTick ?? null, lower: null, upper: null },
-      holderFlow: null,
+      high24hUsd: max(ohlcv30m), low24hUsd: min(ohlcv30m), high7dUsd: max(ohlcv1h), low7dUsd: min(ohlcv1h),
+      volume5mUsd: sum(ohlcv5m.slice(-1)), volume30mUsd: sum(ohlcv30m.slice(-1)), volume1hUsd: sum(ohlcv1h.slice(-1)), volume24hUsd: selected?.volume24hUsd ?? null,
+      tvlUsd: selected?.liquidityUsd ?? null, activeLiquidityUsd: null, feeTier: verified.onchain?.feeTier ?? selected?.feeTier ?? null, poolAgeDays: selected?.poolAgeDays ?? null,
+      tick: { current: verified.onchain?.currentTick ?? null, lower: null, upper: null }, holderFlow: null,
     },
     history: { ohlcv5m, ohlcv30m, ohlcv1h, ohlcv1d },
-    evidence: { grade, freshnessSeconds, conflicts, wickPenalty, sources: collapseStatuses(statuses) },
+    evidence: { grade, freshnessSeconds, conflicts, wickPenalty, sources: collapseStatuses(statuses), surfaceReceipts },
     failureState: grade === "D" ? "BLOCKED_EVIDENCE" : null,
   };
 }
